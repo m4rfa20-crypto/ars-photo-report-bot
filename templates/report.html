@@ -1,140 +1,67 @@
 <!DOCTYPE html>
-<html lang="ar" dir="rtl">
-
+<html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <title>Construction Site Report</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Amiri:ital,wght@0,400;0,700;1,400;1,700&display=swap"
-        rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
+    <title>Фотоотчёт о ходе строительных работ</title>
+    <style>{{ css }}</style>
 </head>
-
 <body>
-    <div class="header-container">
-        <div class="title-container">
-            <h1>مشروع برج نؤاس</h1>
-            <h2>التقرير اليومي</h2>
-        </div>
-        <div class="logo-container">
-            <img src="data:image/png;base64,{{ logo_b64 }}" alt="Burj Nawas Logo" class="logo">
-        </div>
-        <div class="header-left">
-            <p><strong>Date:</strong> {{ date }}</p>
-            <p><strong>Report No:</strong> {{ report_id }}</p>
-        </div>
-    </div>
-
-    <!-- Section 1: Weather -->
-    <div class="section">
-        <h3>1. حالة الطقس (Weather Conditions)</h3>
-        <div class="subsection">
-            {% if weather.current %}
-            <div class="weather-current-grid">
-                <div class="weather-item">
-                    <span class="weather-icon-small">🌡️</span>
-                    <div>
-                        <span class="label">درجة الحرارة</span>
-                        <span class="value">{{ weather.current.main.temp }}°C</span>
-                    </div>
-                </div>
-                <div class="weather-item">
-                    <span class="weather-icon-small">💨</span>
-                    <div>
-                        <span class="label">سرعة الرياح</span>
-                        <span class="value">{{ weather.current.wind.speed }} m/s</span>
-                    </div>
-                </div>
-                <div class="weather-item">
-                    <img src="{{ weather.current.weather[0].icon_url }}" alt="Condition Icon"
-                        class="weather-icon-small">
-                    <div>
-                        <span class="label">الحالة</span>
-                        <span class="value">{{ weather.current.weather[0].description }}</span>
-                    </div>
+    {% for page in pages %}
+    <section class="report-page{% if not loop.last %} force-page-break{% endif %}">
+        <svg class="watermark" viewBox="0 0 273 280" aria-hidden="true">
+            <path d="{{ arsolit_icon_path }}"></path>
+        </svg>
+        {% if loop.first %}
+        <header class="report-header">
+            <div class="brand-block">
+                <svg class="brand-logo" viewBox="0 0 273 344" aria-label="Арсолит">
+                    <path d="{{ arsolit_logo_path }}"></path>
+                </svg>
+                <div>
+                    <div class="company-name">Арсолит</div>
+                    <div class="eyebrow">Фотоотчёт о ходе строительных работ</div>
+                    <h1>{{ project_name }}</h1>
                 </div>
             </div>
-            {% else %}
-            <p>بيانات غير متاحة</p>
-            {% endif %}
-        </div>
-    </div>
+            <div class="period">
+                <div class="period-label">Период</div>
+                <div>{{ start_date }} — {{ end_date }}</div>
+            </div>
+        </header>
+        {% endif %}
 
-    <!-- Section 2: OpenProject -->
-    <div class="section">
-        <h3>2. بيانات المشروع (Project Data)</h3>
-        <div class="subsection">
-            <h4>الأعمال النشطة حالياً (Active Work Packages)</h4>
-            {% if projects.active %}
-            <div class="wp-list">
-                {% for task in projects.active %}
-                <div class="wp-parent">
-                    <div class="wp-parent-header">
-                        <span class="wp-status-badge wp-status-{{ task.status | lower | replace(' ', '-') }}">{{ task.status }}</span>
-                        <a href="{{ task.url }}" class="wp-title">{{ task.subject }}</a>
-                        {% if task.dueDate %}<span class="wp-due">📅 {{ task.dueDate }}</span>{% endif %}
-                    </div>
-                    {% if task.children %}
-                    <div class="wp-children">
-                        {% for child in task.children %}
-                        <div class="wp-child">
-                            <span class="wp-status-badge wp-status-{{ child.status | lower | replace(' ', '-') }}">{{ child.status }}</span>
-                            <a href="{{ child.url }}" class="wp-title">{{ child.subject }}</a>
-                            {% if child.dueDate %}<span class="wp-due">📅 {{ child.dueDate }}</span>{% endif %}
-                        </div>
-                        {% endfor %}
-                    </div>
-                    {% endif %}
-                </div>
+        <h2 class="day-title">{{ page.date }}</h2>
+
+        <article class="entry">
+            <div class="entry-head">
+                {% if page.caption %}
+                <div class="caption">{{ page.caption }}</div>
+                {% endif %}
+
+                {% if page.username %}
+                <div class="author">{{ page.username }}</div>
+                {% endif %}
+            </div>
+
+            <div class="photo-grid rows-{{ page.rows }}">
+                {% for photo in page.photos %}
+                <figure class="photo-{{ photo.orientation }}">
+                    <img
+                        class="img-{{ photo.orientation }}"
+                        src="data:image/jpeg;base64,{{ photo.b64 }}"
+                        alt=""
+                    >
+                </figure>
                 {% endfor %}
             </div>
-            {% else %}
-            <p class="no-data">لا يوجد أعمال نشطة حالياً.</p>
-            {% endif %}
-        </div>
-    </div>
+        </article>
 
-    <!-- Section 3: Chat Summary -->
-    <div class="section">
-        <h3>3. ملخص أنشطة الموقع (Site Activities Summary)</h3>
-        <div class="subsection">
-            <h4>القوى العاملة والمعدات (Site Manpower and Machinery)</h4>
-            <div class="content">
-                {{ site_manpower_machinery | safe }}
-            </div>
-        </div>
-        <div class="subsection">
-            <h4>أنشطة الموقع (Site Activities)</h4>
-            <div class="content">
-                {{ site_activities | safe }}
-            </div>
-        </div>
-    </div>
-
-    <!-- Section 4: Photos -->
-    <div class="section">
-        <h3>4. التوثيق الصوري (Photo Documentation)</h3>
-        <div class="photo-grid">
-            {% for photo in photos %}
-            <div class="photo-item">
-                <img src="data:image/jpeg;base64,{{ photo.b64 }}" class="site-photo">
-                <div class="photo-number">صورة {{ loop.index }}{% if photo.timestamp %} — {{ photo.timestamp }}{% endif %}</div>
-            </div>
-            {% else %}
-            <p>لا يوجد صور موثقة اليوم.</p>
-            {% endfor %}
-        </div>
-        {% if photos_dropped_count > 0 %}
-        <div class="warning-box" style="background-color: #fff3cd; border: 1px solid #ffeeba; color: #856404; padding: 10px; border-radius: 5px; margin-top: 10px; font-size: 0.9em; text-align: center;">
-            ⚠️ تم إدراج أول {{ photos|length }} صورة فقط لضمان جودة التقرير. تم استبعاد {{ photos_dropped_count }} صورة إضافية.
+        {% if loop.last %}
+        <div class="generated">
+            Сформировано автоматически {{ generated_at }}
         </div>
         {% endif %}
-    </div>
-
-    <div class="footer">
-        <p>تم انشاء التقرير بواسطة AI Site Coordinator © {{ date }} برج نؤاس. جميع الحقوق محفوظة.</p>
-    </div>
-
+    </section>
+    {% endfor %}
 </body>
 </html>

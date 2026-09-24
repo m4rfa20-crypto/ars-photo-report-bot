@@ -1,10 +1,10 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text
-from sqlalchemy.orm import DeclarativeBase
 from datetime import datetime, timezone
 
+from sqlalchemy import Column, DateTime, Integer, String, Text, UniqueConstraint
+from sqlalchemy.orm import DeclarativeBase
 
-def _utcnow():
-    """Returns current UTC time as a timezone-naive datetime (SQLite compatible)."""
+
+def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
@@ -12,47 +12,40 @@ class Base(DeclarativeBase):
     pass
 
 
-class ChatLog(Base):
-    __tablename__ = "chat_logs"
+class WorkLog(Base):
+    __tablename__ = "work_logs"
+    __table_args__ = (
+        UniqueConstraint("chat_id", "message_id", name="uq_work_logs_chat_message"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(String, index=True)
-    username = Column(String)
-    message = Column(Text)
-    timestamp = Column(DateTime, default=_utcnow)
+    chat_id = Column(String, index=True, nullable=False)
+    message_thread_id = Column(Integer, index=True, nullable=False, default=0)
+    message_id = Column(Integer, nullable=False)
+    media_group_id = Column(String, index=True, nullable=True)
 
-    def __repr__(self):
-        return f"<ChatLog(user={self.username}, date={self.timestamp})>"
+    user_id = Column(String, nullable=True)
+    username = Column(String, nullable=True)
 
-class Report(Base):
-    __tablename__ = "reports"
+    text = Column(Text, nullable=True)
+    photo_file_id = Column(Text, nullable=True)
+    photo_unique_id = Column(String, nullable=True)
 
-    id = Column(Integer, primary_key=True, index=True)
-    report_id_str = Column(String, unique=True, index=True) # e.g. BN-FEB-26-001
-    date = Column(String) # YYYY-MM-DD
-    file_path = Column(String)
-    created_at = Column(DateTime, default=_utcnow)
+    timestamp = Column(DateTime, default=_utcnow, index=True, nullable=False)
 
-class PhotoMetadata(Base):
-    __tablename__ = "photo_metadata"
 
-    id = Column(Integer, primary_key=True, index=True)
-    file_unique_id = Column(String, unique=True, index=True)
-    file_path = Column(String)
-    analysis = Column(Text)
-    caption = Column(Text, nullable=True)
-    timestamp = Column(DateTime, default=_utcnow)
-    date_str = Column(String, index=True) # YYYY-MM-DD required for filtering by day
-
-class ReportCounter(Base):
-    __tablename__ = "report_counters"
+class ObjectSettings(Base):
+    __tablename__ = "object_settings"
+    __table_args__ = (
+        UniqueConstraint(
+            "chat_id",
+            "message_thread_id",
+            name="uq_object_settings_chat_thread",
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
-    month_key = Column(String, unique=True) # e.g. 2026-02
-    count = Column(Integer, default=0)
-
-class BotSettings(Base):
-    __tablename__ = "bot_settings"
-
-    key = Column(String, primary_key=True, index=True)
-    value = Column(String)
+    chat_id = Column(String, index=True, nullable=False)
+    message_thread_id = Column(Integer, index=True, nullable=False, default=0)
+    project_name = Column(String, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)

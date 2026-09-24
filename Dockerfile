@@ -1,33 +1,16 @@
 FROM python:3.13-slim
 
-# Install system dependencies for Playwright and others
 ENV PYTHONUNBUFFERED=1
-RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg \
-    tzdata \
-    && rm -rf /var/lib/apt/lists/*
+ENV TZ=Europe/Moscow
 
-ENV TZ=Asia/Baghdad
-
-# Set working directory
 WORKDIR /app
 
-# Copy requirements
 COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt \
+    && playwright install --with-deps chromium
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Install Playwright browsers
-RUN playwright install chromium
-RUN playwright install-deps chromium
-
-# Copy application code
 COPY . .
 
-# Create data directory
-RUN mkdir -p data/logs data/reports
+RUN mkdir -p /app/data
 
-# Run the application
 CMD ["python", "-m", "src.main"]

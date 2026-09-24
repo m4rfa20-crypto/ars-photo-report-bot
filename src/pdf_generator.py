@@ -1,132 +1,212 @@
 import asyncio
 import base64
+import html
 import io
-import logging
 import os
+import tempfile
 from datetime import datetime
-from jinja2 import Environment, FileSystemLoader
-from playwright.async_api import async_playwright
-from PIL import Image
 
-logger = logging.getLogger(__name__)
+from jinja2 import Environment, FileSystemLoader
+from PIL import Image, ImageOps
+from playwright.async_api import async_playwright
+
+ARSOLIT_BLUE = "#005DAB"
+ARSOLIT_LOGO_PATH = "M 133 312 L 135 313 L 134 332 L 132 331 Z M 51 312 L 54 313 L 53 322 L 50 321 Z M 11 312 L 13 313 L 12 324 L 10 323 Z M 247 302 L 247 312 L 253 313 L 253 343 L 263 343 L 263 313 L 270 312 L 270 302 Z M 205 302 L 205 343 L 213 343 L 215 341 L 219 327 L 220 342 L 229 343 L 230 302 L 220 302 L 215 317 L 214 302 Z M 166 302 L 164 331 L 162 332 L 162 343 L 172 343 L 175 312 L 176 343 L 186 343 L 186 302 Z M 122 302 L 122 343 L 145 343 L 145 302 Z M 82 302 L 82 343 L 104 343 L 104 328 L 94 328 L 94 331 L 91 331 L 91 313 L 93 312 L 94 316 L 104 316 L 104 302 Z M 63 302 L 41 302 L 41 343 L 50 343 L 51 333 L 63 332 Z M 2 302 L 0 343 L 9 343 L 10 335 L 14 336 L 14 343 L 23 343 L 21 302 Z M 237 5 L 203 5 L 202 63 L 139 0 L 137 0 L 7 126 L 2 132 L 2 287 L 215 287 L 216 155 L 139 75 L 116 96 L 56 156 L 56 233 L 90 233 L 90 170 L 119 138 L 136 121 L 139 120 L 182 168 L 182 191 L 108 192 L 108 220 L 181 220 L 182 255 L 114 256 L 36 254 L 36 145 L 137 46 L 237 144 L 236 286 L 271 286 L 272 133 L 237 97 Z"
+ARSOLIT_ICON_PATH = "M 237 5 L 203 5 L 202 63 L 139 0 L 137 0 L 7 126 L 2 132 L 2 279 L 215 279 L 216 155 L 139 75 L 116 96 L 56 156 L 56 233 L 90 233 L 90 170 L 119 138 L 136 121 L 139 120 L 182 168 L 182 191 L 108 192 L 108 220 L 181 220 L 182 255 L 114 256 L 36 254 L 36 145 L 137 46 L 237 144 L 236 279 L 271 279 L 272 133 L 237 97 Z"
 
 
 class PDFGenerator:
     def __init__(self, template_dir="templates"):
         self.env = Environment(loader=FileSystemLoader(template_dir))
-        self.output_dir = os.path.join("data", "reports")
-        os.makedirs(self.output_dir, exist_ok=True)
-        self._logo_b64: str = ""
+        self.template_dir = template_dir
+        self.playwright = None
+        self.browser = None
 
     async def start_browser(self):
-        """Launches the browser instance and caches static assets."""
+        if self.browser:
+            return
         self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(args=['--no-sandbox'])
-
-        # Cache logo and CSS — both are static and never change between reports
-        logo_path = os.path.join("templates", "src", "logo.png")
-        self._logo_b64 = await self._encode_file(logo_path)
-
-        css_path = os.path.join("templates", "style.css")
-        self._css = await asyncio.to_thread(self._sync_read_text, css_path)
-        logger.info("Logo and CSS cached.")
-
-    @staticmethod
-    def _sync_read_text(path: str) -> str:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
+        self.browser = await self.playwright.chromium.launch(args=["--no-sandbox"])
 
     async def close_browser(self):
-        """Closes the browser instance."""
         if self.browser:
             await self.browser.close()
+            self.browser = None
         if self.playwright:
             await self.playwright.stop()
-
-    async def _encode_file(self, path: str) -> str:
-        """Encodes a file to base64 string, off the event loop."""
-        try:
-            return await asyncio.to_thread(self._sync_encode_file, path)
-        except Exception as e:
-            logger.error(f"Error encoding file {path}: {e}")
-            return ""
+            self.playwright = None
 
     @staticmethod
-    def _sync_encode_file(path: str) -> str:
-        with open(path, "rb") as f:
-            return base64.b64encode(f.read()).decode('utf-8')
+    def _encode_image_sync(path: str, max_width: int = 1200, quality: int = 78) -> dict:
+        with Image.open(path) as source:
+            img = ImageOps.exif_transpose(source)
 
-    async def _optimize_image(self, path, max_width=800, quality=75):
-        """Resizes and compresses an image, returning base64."""
-        try:
-            return await asyncio.to_thread(self._sync_optimize, path, max_width, quality)
-        except Exception as e:
-            logger.error(f"Error optimizing image {path}: {e}")
-            return await self._encode_file(path)
-
-    def _sync_optimize(self, path, max_width, quality):
-        """Synchronous part of image optimization."""
-        with Image.open(path) as img:
-            # Convert to RGB if necessary (e.g. PNG with transparency saved as JPEG)
-            if img.mode in ("RGBA", "P"):
+            if img.mode not in ("RGB", "L"):
                 img = img.convert("RGB")
 
-            # Resize maintaining aspect ratio
             width, height = img.size
             if width > max_width:
-                ratio = max_width / float(width)
-                new_size = (max_width, int(float(height) * ratio))
-                img = img.resize(new_size, Image.Resampling.LANCZOS)
+                ratio = max_width / width
+                img = img.resize(
+                    (max_width, int(height * ratio)),
+                    Image.Resampling.LANCZOS,
+                )
+                width, height = img.size
+
+            aspect_ratio = width / height if height else 1
+            if aspect_ratio < 0.82:
+                orientation = "portrait"
+            elif aspect_ratio > 1.22:
+                orientation = "landscape"
+            else:
+                orientation = "square"
 
             buffer = io.BytesIO()
             img.save(buffer, format="JPEG", quality=quality, optimize=True)
-            return base64.b64encode(buffer.getvalue()).decode('utf-8')
 
-    async def generate_report(self, data):
-        """Generates a PDF report from data using the persistent browser."""
-        if not hasattr(self, 'browser') or not self.browser:
+            return {
+                "b64": base64.b64encode(buffer.getvalue()).decode("utf-8"),
+                "orientation": orientation,
+                "aspect_ratio": round(aspect_ratio, 3),
+            }
+
+    async def _encode_image(self, path: str) -> dict:
+        return await asyncio.to_thread(self._encode_image_sync, path)
+
+    @staticmethod
+    def _slot_cost(photo: dict) -> int:
+        return 2 if photo.get("orientation") == "landscape" else 1
+
+    @classmethod
+    def _split_by_slots(cls, photos, max_slots: int = 4):
+        chunks = []
+        current = []
+        used = 0
+
+        for photo in photos:
+            cost = cls._slot_cost(photo)
+
+            if current and used + cost > max_slots:
+                chunks.append(current)
+                current = []
+                used = 0
+
+            current.append(photo)
+            used += cost
+
+            if used == max_slots:
+                chunks.append(current)
+                current = []
+                used = 0
+
+        if current:
+            chunks.append(current)
+
+        return chunks
+
+    @staticmethod
+    def _visual_rows(photos) -> int:
+        landscapes = sum(1 for p in photos if p.get("orientation") == "landscape")
+        compact = len(photos) - landscapes
+        return landscapes + ((compact + 1) // 2)
+
+    async def generate_report(self, project_name, start_date, end_date, items) -> str:
+        if not self.browser:
             await self.start_browser()
 
-        # Use cached logo
-        data['logo_b64'] = self._logo_b64
+        pages = []
 
-        # Optimize photos and apply safety limits
-        original_photos = data.get('photos', [])
-        MAX_PHOTOS = 50
-        photos_dropped = 0
+        for item in items:
+            encoded = []
+            for path in item.get("photo_paths", []):
+                if os.path.exists(path):
+                    encoded.append(await self._encode_image(path))
 
-        work_photos = original_photos[:MAX_PHOTOS]
-        if len(original_photos) > MAX_PHOTOS:
-            photos_dropped = len(original_photos) - MAX_PHOTOS
+            if not encoded:
+                continue
 
-        optimized_photos = []
-        for photo in work_photos:
-            photo_path = photo.get('file_path')
-            if photo_path and os.path.exists(photo_path):
-                photo['b64'] = await self._optimize_image(photo_path)
-                optimized_photos.append(photo)
+            chunks = self._split_by_slots(encoded, 4)
 
-        data['photos'] = optimized_photos
-        data['photos_dropped_count'] = photos_dropped
+            for index, chunk in enumerate(chunks):
+                caption = item.get("caption", "")
+                if index > 0 and caption:
+                    caption = f"{caption} — продолжение"
+
+                pages.append(
+                    {
+                        "date": item.get("date", ""),
+                        "caption": caption,
+                        "username": item.get("username", ""),
+                        "photos": chunk,
+                        "rows": max(1, min(2, self._visual_rows(chunk))),
+                        "continued": index > 0,
+                    }
+                )
+
+        with open(os.path.join(self.template_dir, "style.css"), "r", encoding="utf-8") as fh:
+            css = fh.read()
 
         template = self.env.get_template("report.html")
-        html_content = template.render(**data)
+        html_content = template.render(
+            project_name=project_name,
+            start_date=start_date.strftime("%d.%m.%Y"),
+            end_date=end_date.strftime("%d.%m.%Y"),
+            generated_at=datetime.now().strftime("%d.%m.%Y %H:%M"),
+            pages=pages,
+            css=css,
+            brand_blue=ARSOLIT_BLUE,
+            arsolit_logo_path=ARSOLIT_LOGO_PATH,
+            arsolit_icon_path=ARSOLIT_ICON_PATH,
+        )
 
-        # Create output directory for today
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        daily_output_dir = os.path.join(self.output_dir, date_str)
-        os.makedirs(daily_output_dir, exist_ok=True)
+        period = f"{start_date.strftime('%d.%m.%Y')} — {end_date.strftime('%d.%m.%Y')}"
+        safe_project = html.escape(project_name)
+        safe_period = html.escape(period)
+
+        footer_template = f"""
+        <div style="
+            width:100%;
+            font-family:Arial,Helvetica,sans-serif;
+            font-size:8px;
+            color:#777;
+            padding:0 12mm;
+            display:flex;
+            justify-content:space-between;
+            align-items:center;
+        ">
+            <span style="display:flex;align-items:center;gap:5px;">
+                <svg width="12" height="14" viewBox="0 0 273 280" aria-hidden="true">
+                    <path d="{ARSOLIT_ICON_PATH}" fill="{ARSOLIT_BLUE}"></path>
+                </svg>
+                <span>Арсолит · {safe_project}</span>
+            </span>
+            <span>{safe_period}</span>
+            <span>Стр. <span class="pageNumber"></span> из <span class="totalPages"></span></span>
+        </div>
+        """
 
         page = await self.browser.new_page()
         try:
-            await page.set_content(html_content, wait_until='domcontentloaded', timeout=60000)
-            await page.add_style_tag(content=self._css)
+            await page.set_content(html_content, wait_until="domcontentloaded")
+            output = os.path.join(
+                tempfile.gettempdir(),
+                f"ars_photo_report_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.pdf",
+            )
 
-            report_id = data.get('report_id', datetime.now().strftime("%Y%m%d%H%M%S"))
-            filename = f"Site_Report_{report_id}.pdf"
-            output_path = os.path.join(daily_output_dir, filename)
-
-            await page.pdf(path=output_path, format="A4", print_background=True)
-            return output_path
+            await page.pdf(
+                path=output,
+                format="A4",
+                print_background=True,
+                display_header_footer=True,
+                header_template="<div></div>",
+                footer_template=footer_template,
+                margin={
+                    "top": "12mm",
+                    "right": "12mm",
+                    "bottom": "18mm",
+                    "left": "12mm",
+                },
+            )
+            return output
         finally:
             await page.close()
