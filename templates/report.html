@@ -8,12 +8,20 @@
 <body>
     {% for page in pages %}
     <section class="report-page{% if not loop.last %} force-page-break{% endif %}">
+        <svg class="watermark" viewBox="0 0 273 280" aria-hidden="true">
+            <path d="{{ arsolit_icon_path }}"></path>
+        </svg>
         {% if loop.first %}
         <header class="report-header">
-            <div>
-                <div class="company-name">Арсолит</div>
-                <div class="eyebrow">Фотоотчёт о ходе строительных работ</div>
-                <h1>{{ project_name }}</h1>
+            <div class="brand-block">
+                <svg class="brand-logo" viewBox="0 0 273 344" aria-label="Арсолит">
+                    <path d="{{ arsolit_logo_path }}"></path>
+                </svg>
+                <div>
+                    <div class="company-name">Арсолит</div>
+                    <div class="eyebrow">Фотоотчёт о ходе строительных работ</div>
+                    <h1>{{ project_name }}</h1>
+                </div>
             </div>
             <div class="period">
                 <div class="period-label">Период</div>
