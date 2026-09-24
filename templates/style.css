@@ -16,8 +16,30 @@ body {
 }
 
 .report-page {
+    position: relative;
     width: 100%;
+    min-height: 245mm;
     break-inside: avoid;
+}
+
+.report-page > *:not(.watermark) {
+    position: relative;
+    z-index: 1;
+}
+
+.watermark {
+    position: absolute;
+    right: 4mm;
+    bottom: 12mm;
+    width: 105mm;
+    height: auto;
+    z-index: 0;
+    pointer-events: none;
+}
+
+.watermark path {
+    fill: #d7dce2;
+    opacity: .28;
 }
 
 .force-page-break {
@@ -30,9 +52,25 @@ body {
     justify-content: space-between;
     gap: 24px;
     align-items: flex-start;
-    border-bottom: 2px solid #222;
+    border-bottom: 2px solid #005DAB;
     padding-bottom: 10px;
     margin-bottom: 14px;
+}
+
+.brand-block {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.brand-logo {
+    width: 34px;
+    height: 43px;
+    flex: 0 0 auto;
+}
+
+.brand-logo path {
+    fill: #005DAB;
 }
 
 .company-name {
@@ -40,7 +78,7 @@ body {
     font-size: 14px;
     line-height: 1.1;
     font-weight: 700;
-    color: #1f4e78;
+    color: #005DAB;
 }
 
 .eyebrow {
@@ -73,9 +111,9 @@ h1 {
     padding: 7px 9px;
     font-size: 14px;
     line-height: 1.2;
-    background: #1f4e78;
+    background: #005DAB;
     color: #fff;
-    border-left: 3px solid #163a5c;
+    border-left: 3px solid #004b8a;
     break-after: avoid;
 }
 
