@@ -69,8 +69,8 @@ async def post_shutdown(application: Application) -> None:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Бот фотоотчётов готов.\n\n"
-        "Просто отправляйте в эту группу фотографии с подписями и текстовые сообщения. "
-        "Для формирования отчёта используйте /report."
+        "Отправляйте в эту группу фотографии или фотоальбомы с подписями. "
+        "Обычная переписка в фотоотчёт не попадает. Для формирования отчёта используйте /report."
     )
 
 
@@ -78,7 +78,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(
         "/report — выбрать период отчёта\n"
         "/report 01.09.2026 07.09.2026 — отчёт за произвольный период\n\n"
-        "Фотографии и подписи сохраняются автоматически. Сам бот в рабочем чате не спамит."
+        "В отчёт попадают только фотографии и фотоальбомы. Обычные текстовые сообщения игнорируются."
     )
 
 
@@ -207,6 +207,7 @@ async def load_rows(chat_id: int, start_date, end_date):
                 WorkLog.chat_id == str(chat_id),
                 WorkLog.timestamp >= start_utc,
                 WorkLog.timestamp < end_utc,
+                WorkLog.photo_file_id.is_not(None),
             )
             .order_by(WorkLog.timestamp, WorkLog.message_id)
         )
@@ -331,7 +332,7 @@ def main() -> None:
     application.add_handler(CommandHandler("report", report_command))
     application.add_handler(CallbackQueryHandler(report_button, pattern=r"^report:"))
     application.add_handler(
-        MessageHandler((filters.PHOTO | filters.TEXT) & ~filters.COMMAND, save_work_log)
+        MessageHandler(filters.PHOTO, save_work_log)
     )
 
     logger.info("Starting @arsphotobot")
