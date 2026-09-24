@@ -6,35 +6,36 @@
     <style>{{ css }}</style>
 </head>
 <body>
-    <header class="report-header">
-        <div>
-            <div class="eyebrow">Фотоотчёт о ходе строительных работ</div>
-            <h1>{{ project_name }}</h1>
-        </div>
-        <div class="period">
-            <div class="period-label">Период</div>
-            <div>{{ start_date }} — {{ end_date }}</div>
-        </div>
-    </header>
+    {% for page in pages %}
+    <section class="report-page{% if not loop.last %} force-page-break{% endif %}">
+        {% if loop.first %}
+        <header class="report-header">
+            <div>
+                <div class="eyebrow">Фотоотчёт о ходе строительных работ</div>
+                <h1>{{ project_name }}</h1>
+            </div>
+            <div class="period">
+                <div class="period-label">Период</div>
+                <div>{{ start_date }} — {{ end_date }}</div>
+            </div>
+        </header>
+        {% endif %}
 
-    {% for day in days %}
-    <section class="day-section">
-        <h2 class="day-title">{{ day.date }}</h2>
+        <h2 class="day-title">{{ page.date }}</h2>
 
-        {% for item in day["items"] %}
         <article class="entry">
             <div class="entry-head">
-                {% if item.caption %}
-                <div class="caption">{{ item.caption }}</div>
+                {% if page.caption %}
+                <div class="caption">{{ page.caption }}</div>
                 {% endif %}
 
-                {% if item.username %}
-                <div class="author">{{ item.username }}</div>
+                {% if page.username %}
+                <div class="author">{{ page.username }}</div>
                 {% endif %}
             </div>
 
-            <div class="photo-grid photo-count-{{ item.photos|length }}">
-                {% for photo in item.photos %}
+            <div class="photo-grid rows-{{ page.rows }}">
+                {% for photo in page.photos %}
                 <figure class="photo-{{ photo.orientation }}">
                     <img
                         class="img-{{ photo.orientation }}"
@@ -45,12 +46,13 @@
                 {% endfor %}
             </div>
         </article>
-        {% endfor %}
+
+        {% if loop.last %}
+        <div class="generated">
+            Сформировано автоматически {{ generated_at }}
+        </div>
+        {% endif %}
     </section>
     {% endfor %}
-
-    <div class="generated">
-        Сформировано автоматически {{ generated_at }}
-    </div>
 </body>
 </html>
