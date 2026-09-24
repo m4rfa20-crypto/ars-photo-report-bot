@@ -8,7 +8,7 @@ from collections import OrderedDict
 from datetime import datetime
 
 from jinja2 import Environment, FileSystemLoader
-from PIL import Image
+from PIL import Image, ImageOps
 from playwright.async_api import async_playwright
 
 
@@ -34,8 +34,11 @@ class PDFGenerator:
             self.playwright = None
 
     @staticmethod
-    def _encode_image_sync(path: str, max_width: int = 1200, quality: int = 78) -> str:
-        with Image.open(path) as img:
+    def _encode_image_sync(path: str, max_width: int = 1200, quality: int = 78) -> dict:
+        with Image.open(path) as source:
+            # Apply EXIF rotation before stripping metadata while re-encoding.
+            img = ImageOps.exif_transpose(source)
+
             if img.mode not in ("RGB", "L"):
                 img = img.convert("RGB")
 
@@ -43,12 +46,26 @@ class PDFGenerator:
             if width > max_width:
                 ratio = max_width / width
                 img = img.resize((max_width, int(height * ratio)), Image.Resampling.LANCZOS)
+                width, height = img.size
+
+            aspect_ratio = width / height if height else 1
+            if aspect_ratio < 0.82:
+                orientation = "portrait"
+            elif aspect_ratio > 1.22:
+                orientation = "landscape"
+            else:
+                orientation = "square"
 
             buffer = io.BytesIO()
             img.save(buffer, format="JPEG", quality=quality, optimize=True)
-            return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
-    async def _encode_image(self, path: str) -> str:
+            return {
+                "b64": base64.b64encode(buffer.getvalue()).decode("utf-8"),
+                "orientation": orientation,
+                "aspect_ratio": round(aspect_ratio, 3),
+            }
+
+    async def _encode_image(self, path: str) -> dict:
         return await asyncio.to_thread(self._encode_image_sync, path)
 
     @staticmethod
