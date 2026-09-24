@@ -1,257 +1,124 @@
-body {
-    font-family: 'Amiri', serif;
-    direction: rtl;
-    background-color: #f4f6f9;
-    color: #333;
-    padding: 20px;
+@page {
+    size: A4;
 }
 
-.header-container {
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    font-family: Arial, Helvetica, sans-serif;
+    color: #222;
+    background: #fff;
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.report-header {
     display: flex;
     justify-content: space-between;
-    align-items: center;
-    background-color: #1a6563;
-    /* Restored Green */
-    color: #e8bc91;
-    /* Restored Gold text */
-    border-bottom: 3px solid #145250;
-    padding: 20px;
-    /* Increased padding for bg */
-    margin-bottom: 30px;
-    border-radius: 5px;
-    /* Added radius for look */
-}
-
-.logo {
-    height: 80px;
-}
-
-.title-container h1 {
-    color: #ffffff;
-    /* White on Green */
-    margin: 0;
-    font-size: 24px;
-}
-
-.title-container h2 {
-    color: #e8bc91;
-    /* Gold on Green */
-    margin: 5px 0 0;
-    font-size: 18px;
-}
-
-.section {
-    background: white;
-    padding: 20px;
-    border-radius: 8px;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
-    margin-bottom: 20px;
-}
-
-h3 {
-    color: #1a6563;
-    /* Green */
-    border-bottom: 1px solid #e8bc91;
-    /* Gold accent */
-    padding-bottom: 10px;
-    margin-top: 0;
-}
-
-h4 {
-    color: #495057;
-    margin-bottom: 15px;
-}
-
-.subsection {
-    margin-bottom: 20px;
-}
-
-/* Weather Grid */
-.weather-current-grid {
-    display: flex;
     gap: 20px;
-    flex-wrap: wrap;
+    align-items: flex-start;
+    border-bottom: 2px solid #222;
+    padding-bottom: 12px;
+    margin-bottom: 18px;
 }
 
-.weather-item {
-    display: flex;
-    align-items: center;
-    background: #e9ecef;
-    padding: 10px 15px;
-    border-radius: 8px;
+.eyebrow {
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    font-size: 10px;
+    color: #666;
+    margin-bottom: 4px;
+}
+
+h1 {
+    margin: 0;
+    font-size: 22px;
+    line-height: 1.2;
+}
+
+.period {
+    text-align: right;
     min-width: 150px;
+    font-size: 11px;
 }
 
-.weather-icon-small {
-    width: 32px;
-    height: 32px;
-    margin-left: 10px;
+.entry {
+    break-inside: avoid;
+    margin-bottom: 18px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid #d9d9d9;
 }
 
-.weather-item .label {
-    display: block;
-    font-size: 0.8em;
-    color: #6c757d;
+.entry-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 15px;
+    align-items: baseline;
+    margin-bottom: 7px;
 }
 
-.weather-item .value {
-    display: block;
-    font-weight: bold;
-    font-size: 1.1em;
+.date {
+    font-size: 15px;
+    font-weight: 700;
 }
 
-/* Photo Grid */
+.time {
+    margin-left: 8px;
+    color: #666;
+}
+
+.author {
+    color: #666;
+    font-size: 10px;
+}
+
+.caption {
+    font-size: 12px;
+    margin-bottom: 10px;
+    white-space: pre-wrap;
+}
+
 .photo-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-    gap: 15px;
-    margin-bottom: 20px;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
 }
 
-.photo-item {
-    border: 1px solid #dee2e6;
-    border-radius: 8px;
+.photo-grid figure {
+    margin: 0;
+    border: 1px solid #ddd;
     overflow: hidden;
-    text-align: center;
+    background: #f3f3f3;
+    min-height: 170px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
-.site-photo {
+.photo-grid img {
     width: 100%;
-    height: 150px;
+    height: 220px;
     object-fit: cover;
     display: block;
 }
 
-.photo-number {
-    padding: 5px;
-    background: #f8f9fa;
-    font-size: 0.9em;
-    font-weight: bold;
-    color: #1a6563;
+.photo-count-1 {
+    grid-template-columns: 1fr;
 }
 
-.photo-analysis-block {
-    background: #f8f9fa;
-    padding: 15px;
-    border-radius: 8px;
-    border-right: 4px solid #1a6563;
+.photo-count-1 img {
+    height: 420px;
+    object-fit: contain;
 }
 
-.analysis-item {
-    margin-bottom: 10px;
-    padding-bottom: 10px;
-    border-bottom: 1px dashed #dee2e6;
-}
-
-.analysis-item:last-child {
-    border-bottom: none;
-}
-
-.due-date {
-    background-color: #ffebee;
-    color: #c62828;
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-weight: bold;
-    font-size: 0.85em;
-    margin-right: 10px;
-    display: inline-block;
-}
-
-ul {
-    padding-right: 20px;
-}
-
-li {
-    margin-bottom: 8px;
-}
-
-/* Work Package Cascade */
-.wp-list {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-}
-
-.wp-parent {
-    border: 1px solid #dee2e6;
-    border-radius: 8px;
-    overflow: hidden;
-}
-
-.wp-parent-header {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 14px;
-    background-color: #f0f4f4;
-    border-right: 4px solid #1a6563;
-}
-
-.wp-children {
-    display: flex;
-    flex-direction: column;
-    border-top: 1px solid #dee2e6;
-}
-
-.wp-child {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 7px 14px 7px 14px;
-    padding-right: 32px;
-    border-bottom: 1px solid #f0f0f0;
-    background-color: #ffffff;
-}
-
-.wp-child:last-child {
-    border-bottom: none;
-}
-
-.wp-title {
-    font-weight: bold;
-    color: #1a6563;
-    text-decoration: none;
-    flex: 1;
-}
-
-.wp-title:hover {
-    text-decoration: underline;
-}
-
-.wp-due {
-    font-size: 0.82em;
-    color: #c62828;
-    background-color: #ffebee;
-    padding: 2px 7px;
-    border-radius: 4px;
-    white-space: nowrap;
-}
-
-.wp-status-badge {
-    font-size: 0.78em;
-    padding: 2px 8px;
-    border-radius: 10px;
-    white-space: nowrap;
-    font-weight: bold;
-}
-
-.wp-status-in-progress {
-    background-color: #e3f2fd;
-    color: #1565c0;
-}
-
-.wp-status-on-hold {
-    background-color: #fff8e1;
-    color: #f57f17;
-}
-
-.wp-status-مهام-فرعية-نشطة {
-    background-color: #f3e5f5;
-    color: #6a1b9a;
-}
-
-.no-data {
-    color: #6c757d;
-    font-style: italic;
+footer {
+    margin-top: 16px;
+    padding-top: 8px;
+    border-top: 1px solid #ddd;
+    color: #888;
+    font-size: 9px;
+    text-align: center;
 }
