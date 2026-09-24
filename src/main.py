@@ -423,6 +423,19 @@ async def build_and_send_report(
     end_date,
     reply_target,
 ) -> None:
+    configured_name = await get_object_name(
+        chat_id,
+        thread_id,
+    )
+
+    if thread_id and not configured_name:
+        await reply_target.reply_text(
+            "Для этой темы ещё не задано название объекта.\n"
+            "Сначала выполните команду:\n"
+            "/object Название объекта"
+        )
+        return
+
     rows = await load_rows(
         chat_id,
         thread_id,
@@ -498,11 +511,6 @@ async def build_and_send_report(
                         "photo_paths": local_paths,
                     }
                 )
-
-            configured_name = await get_object_name(
-                chat_id,
-                thread_id,
-            )
 
             title = (
                 configured_name
