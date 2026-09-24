@@ -35,6 +35,14 @@ body {
     margin-bottom: 14px;
 }
 
+.company-name {
+    margin-bottom: 2px;
+    font-size: 14px;
+    line-height: 1.1;
+    font-weight: 700;
+    color: #1f4e78;
+}
+
 .eyebrow {
     text-transform: uppercase;
     letter-spacing: .05em;
@@ -62,11 +70,12 @@ h1 {
 
 .day-title {
     margin: 0 0 9px;
-    padding: 6px 8px;
+    padding: 7px 9px;
     font-size: 14px;
     line-height: 1.2;
-    background: #f1f1f1;
-    border-left: 3px solid #222;
+    background: #1f4e78;
+    color: #fff;
+    border-left: 3px solid #163a5c;
     break-after: avoid;
 }
 
