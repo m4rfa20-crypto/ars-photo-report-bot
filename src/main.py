@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import os
 import tempfile
@@ -8,11 +7,18 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from src.config import Config
 from src.database import AsyncSessionLocal, init_db
-from src.models import WorkLog
+from src.models import ObjectSettings, WorkLog
 from src.pdf_generator import PDFGenerator
 
 
@@ -34,6 +40,12 @@ def local_date_from_utc(value: datetime):
     return value.replace(tzinfo=timezone.utc).astimezone(LOCAL_TZ).date()
 
 
+def message_thread_id(message) -> int:
+    if not message:
+        return 0
+    return int(getattr(message, "message_thread_id", None) or 0)
+
+
 def parse_date(value: str):
     for fmt in ("%d.%m.%Y", "%Y-%m-%d"):
         try:
@@ -44,8 +56,16 @@ def parse_date(value: str):
 
 
 def date_bounds_utc(start_date, end_date):
-    start_local = datetime.combine(start_date, datetime.min.time(), tzinfo=LOCAL_TZ)
-    end_local = datetime.combine(end_date + timedelta(days=1), datetime.min.time(), tzinfo=LOCAL_TZ)
+    start_local = datetime.combine(
+        start_date,
+        datetime.min.time(),
+        tzinfo=LOCAL_TZ,
+    )
+    end_local = datetime.combine(
+        end_date + timedelta(days=1),
+        datetime.min.time(),
+        tzinfo=LOCAL_TZ,
+    )
     return (
         start_local.astimezone(timezone.utc).replace(tzinfo=None),
         end_local.astimezone(timezone.utc).replace(tzinfo=None),
@@ -54,6 +74,44 @@ def date_bounds_utc(start_date, end_date):
 
 def report_allowed(user_id: int) -> bool:
     return not Config.admin_ids or user_id in Config.admin_ids
+
+
+async def get_object_name(chat_id: int, thread_id: int) -> str | None:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ObjectSettings).where(
+                ObjectSettings.chat_id == str(chat_id),
+                ObjectSettings.message_thread_id == thread_id,
+            )
+        )
+        setting = result.scalar_one_or_none()
+        return setting.project_name if setting else None
+
+
+async def set_object_name(chat_id: int, thread_id: int, project_name: str) -> None:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ObjectSettings).where(
+                ObjectSettings.chat_id == str(chat_id),
+                ObjectSettings.message_thread_id == thread_id,
+            )
+        )
+        setting = result.scalar_one_or_none()
+
+        if setting:
+            setting.project_name = project_name
+            setting.updated_at = utcnow_naive()
+        else:
+            session.add(
+                ObjectSettings(
+                    chat_id=str(chat_id),
+                    message_thread_id=thread_id,
+                    project_name=project_name,
+                    updated_at=utcnow_naive(),
+                )
+            )
+
+        await session.commit()
 
 
 async def post_init(application: Application) -> None:
@@ -69,26 +127,78 @@ async def post_shutdown(application: Application) -> None:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Бот фотоотчётов готов.\n\n"
-        "Отправляйте в эту группу фотографии или фотоальбомы с подписями. "
-        "Обычная переписка в фотоотчёт не попадает. Для формирования отчёта используйте /report."
+        "Отправляйте фотографии или фотоальбомы с подписями. "
+        "Если группа разбита на темы, каждая тема ведётся как отдельный объект.\n\n"
+        "Один раз задайте название объекта командой:\n"
+        "/object Название объекта\n\n"
+        "Для формирования отчёта используйте /report."
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
+        "/object Название объекта — сохранить название текущего объекта/темы\n"
+        "/object — показать текущее название объекта\n"
         "/report — выбрать период отчёта\n"
         "/report 01.09.2026 07.09.2026 — отчёт за произвольный период\n\n"
-        "В отчёт попадают только фотографии и фотоальбомы. Обычные текстовые сообщения игнорируются."
+        "В отчёт попадают только фотографии и фотоальбомы. "
+        "Обычная переписка игнорируется. "
+        "В группе с Темами данные разных тем не смешиваются."
     )
 
 
-async def save_work_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def object_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not report_allowed(update.effective_user.id):
+        await update.message.reply_text(
+            "Настройка объекта доступна только администратору."
+        )
+        return
+
+    chat_id = update.effective_chat.id
+    thread_id = message_thread_id(update.effective_message)
+
+    if not context.args:
+        current = await get_object_name(chat_id, thread_id)
+        if current:
+            await update.message.reply_text(
+                f"Текущее название объекта: {current}"
+            )
+        else:
+            await update.message.reply_text(
+                "Название объекта ещё не задано.\n"
+                "Используйте: /object Название объекта"
+            )
+        return
+
+    project_name = " ".join(context.args).strip()
+    if len(project_name) > 200:
+        await update.message.reply_text(
+            "Название слишком длинное. Используйте не более 200 символов."
+        )
+        return
+
+    await set_object_name(chat_id, thread_id, project_name)
+
+    if thread_id:
+        await update.message.reply_text(
+            f"Готово. Эта тема Telegram теперь объект:\n{project_name}"
+        )
+    else:
+        await update.message.reply_text(
+            f"Готово. Для этой группы задан объект:\n{project_name}"
+        )
+
+
+async def save_work_log(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
     message = update.effective_message
     if not message:
         return
 
     user = update.effective_user
-    text = message.caption if message.photo else message.text
+    text_value = message.caption if message.photo else message.text
     photo_file_id = None
     photo_unique_id = None
 
@@ -99,11 +209,12 @@ async def save_work_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     entry = WorkLog(
         chat_id=str(update.effective_chat.id),
+        message_thread_id=message_thread_id(message),
         message_id=message.message_id,
         media_group_id=message.media_group_id,
         user_id=str(user.id) if user else None,
         username=(user.username or user.full_name) if user else None,
-        text=text or "",
+        text=text_value or "",
         photo_file_id=photo_file_id,
         photo_unique_id=photo_unique_id,
         timestamp=utcnow_naive(),
@@ -121,21 +232,40 @@ def period_keyboard():
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("Сегодня", callback_data="report:today"),
-                InlineKeyboardButton("Последние 7 дней", callback_data="report:7"),
+                InlineKeyboardButton(
+                    "Сегодня",
+                    callback_data="report:today",
+                ),
+                InlineKeyboardButton(
+                    "Последние 7 дней",
+                    callback_data="report:7",
+                ),
             ],
             [
-                InlineKeyboardButton("Последние 30 дней", callback_data="report:30"),
-                InlineKeyboardButton("Другой период", callback_data="report:custom"),
+                InlineKeyboardButton(
+                    "Последние 30 дней",
+                    callback_data="report:30",
+                ),
+                InlineKeyboardButton(
+                    "Другой период",
+                    callback_data="report:custom",
+                ),
             ],
         ]
     )
 
 
-async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def report_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
     if not report_allowed(update.effective_user.id):
-        await update.message.reply_text("Формирование отчётов доступно только администратору.")
+        await update.message.reply_text(
+            "Формирование отчётов доступно только администратору."
+        )
         return
+
+    thread_id = message_thread_id(update.effective_message)
 
     if len(context.args) == 2:
         try:
@@ -145,32 +275,43 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 start_date, end_date = end_date, start_date
         except ValueError:
             await update.message.reply_text(
-                "Не понял даты. Используйте, например:\n/report 01.09.2026 07.09.2026"
+                "Не понял даты. Используйте, например:\n"
+                "/report 01.09.2026 07.09.2026"
             )
             return
 
         await build_and_send_report(
             context=context,
             chat_id=update.effective_chat.id,
+            thread_id=thread_id,
             start_date=start_date,
             end_date=end_date,
             reply_target=update.message,
         )
         return
 
-    await update.message.reply_text("За какой период сформировать отчёт?", reply_markup=period_keyboard())
+    await update.message.reply_text(
+        "За какой период сформировать отчёт?",
+        reply_markup=period_keyboard(),
+    )
 
 
-async def report_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def report_button(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
     query = update.callback_query
     await query.answer()
 
     if not report_allowed(update.effective_user.id):
-        await query.edit_message_text("Формирование отчётов доступно только администратору.")
+        await query.edit_message_text(
+            "Формирование отчётов доступно только администратору."
+        )
         return
 
     action = query.data.split(":", 1)[1]
     today = datetime.now(LOCAL_TZ).date()
+    thread_id = message_thread_id(query.message)
 
     if action == "custom":
         await query.edit_message_text(
@@ -187,24 +328,35 @@ async def report_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         start_date = today - timedelta(days=days - 1)
 
     await query.edit_message_text(
-        f"Формирую отчёт за {start_date.strftime('%d.%m.%Y')}–{end_date.strftime('%d.%m.%Y')}…"
+        "Формирую отчёт за "
+        f"{start_date.strftime('%d.%m.%Y')}–"
+        f"{end_date.strftime('%d.%m.%Y')}…"
     )
+
     await build_and_send_report(
         context=context,
         chat_id=update.effective_chat.id,
+        thread_id=thread_id,
         start_date=start_date,
         end_date=end_date,
         reply_target=query.message,
     )
 
 
-async def load_rows(chat_id: int, start_date, end_date):
+async def load_rows(
+    chat_id: int,
+    thread_id: int,
+    start_date,
+    end_date,
+):
     start_utc, end_utc = date_bounds_utc(start_date, end_date)
+
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(WorkLog)
             .where(
                 WorkLog.chat_id == str(chat_id),
+                WorkLog.message_thread_id == thread_id,
                 WorkLog.timestamp >= start_utc,
                 WorkLog.timestamp < end_utc,
                 WorkLog.photo_file_id.is_not(None),
@@ -216,25 +368,37 @@ async def load_rows(chat_id: int, start_date, end_date):
 
 def group_rows(rows):
     grouped = defaultdict(list)
+
     for row in rows:
         date_key = local_date_from_utc(row.timestamp).isoformat()
+
         if row.media_group_id:
             item_key = f"album:{row.media_group_id}"
         else:
             item_key = f"message:{row.message_id}"
+
         grouped[(date_key, item_key)].append(row)
 
     result = []
+
     for (date_key, _), items in grouped.items():
         first = items[0]
-        caption = next((item.text for item in items if item.text), "")
+        caption = next(
+            (item.text for item in items if item.text),
+            "",
+        )
+
         result.append(
             {
                 "date": date_key,
                 "timestamp": first.timestamp,
                 "caption": caption,
                 "username": first.username or "",
-                "photos": [item for item in items if item.photo_file_id],
+                "photos": [
+                    item
+                    for item in items
+                    if item.photo_file_id
+                ],
             }
         )
 
@@ -242,39 +406,89 @@ def group_rows(rows):
     return result
 
 
-async def download_photo(bot, file_id: str, destination: str):
+async def download_photo(
+    bot,
+    file_id: str,
+    destination: str,
+):
     file = await bot.get_file(file_id)
     await file.download_to_drive(destination)
 
 
-async def build_and_send_report(context, chat_id: int, start_date, end_date, reply_target) -> None:
-    rows = await load_rows(chat_id, start_date, end_date)
+async def build_and_send_report(
+    context,
+    chat_id: int,
+    thread_id: int,
+    start_date,
+    end_date,
+    reply_target,
+) -> None:
+    rows = await load_rows(
+        chat_id,
+        thread_id,
+        start_date,
+        end_date,
+    )
+
     if not rows:
-        await reply_target.reply_text("За выбранный период записей не найдено.")
+        await reply_target.reply_text(
+            "За выбранный период в этом объекте фотографий не найдено."
+        )
         return
 
     groups = group_rows(rows)
-    photo_count = sum(len(group["photos"]) for group in groups)
+    photo_count = sum(
+        len(group["photos"])
+        for group in groups
+    )
 
     status = await reply_target.reply_text(
-        f"Найдено записей: {len(groups)}\nФотографий: {photo_count}\nГотовлю PDF…"
+        f"Найдено записей: {len(groups)}\n"
+        f"Фотографий: {photo_count}\n"
+        "Готовлю PDF…"
     )
 
     try:
-        with tempfile.TemporaryDirectory(prefix="ars_report_") as temp_dir:
+        with tempfile.TemporaryDirectory(
+            prefix="ars_report_"
+        ) as temp_dir:
             report_items = []
 
-            for group_index, group in enumerate(groups, start=1):
+            for group_index, group in enumerate(
+                groups,
+                start=1,
+            ):
                 local_paths = []
-                for photo_index, photo in enumerate(group["photos"], start=1):
-                    path = os.path.join(temp_dir, f"{group_index}_{photo_index}.jpg")
+
+                for photo_index, photo in enumerate(
+                    group["photos"],
+                    start=1,
+                ):
+                    path = os.path.join(
+                        temp_dir,
+                        f"{group_index}_{photo_index}.jpg",
+                    )
+
                     try:
-                        await download_photo(context.bot, photo.photo_file_id, path)
+                        await download_photo(
+                            context.bot,
+                            photo.photo_file_id,
+                            path,
+                        )
                         local_paths.append(path)
                     except Exception as exc:
-                        logger.warning("Failed to download photo %s: %s", photo.id, exc)
+                        logger.warning(
+                            "Failed to download photo %s: %s",
+                            photo.id,
+                            exc,
+                        )
 
-                local_dt = group["timestamp"].replace(tzinfo=timezone.utc).astimezone(LOCAL_TZ)
+                local_dt = (
+                    group["timestamp"]
+                    .replace(tzinfo=timezone.utc)
+                    .astimezone(LOCAL_TZ)
+                )
+
                 report_items.append(
                     {
                         "date": local_dt.strftime("%d.%m.%Y"),
@@ -285,7 +499,17 @@ async def build_and_send_report(context, chat_id: int, start_date, end_date, rep
                     }
                 )
 
-            title = Config.PROJECT_NAME.strip() or getattr(reply_target.chat, "title", None) or "Строительный объект"
+            configured_name = await get_object_name(
+                chat_id,
+                thread_id,
+            )
+
+            title = (
+                configured_name
+                or Config.PROJECT_NAME.strip()
+                or getattr(reply_target.chat, "title", None)
+                or "Строительный объект"
+            )
 
             pdf_path = await pdf_generator.generate_report(
                 project_name=title,
@@ -298,12 +522,23 @@ async def build_and_send_report(context, chat_id: int, start_date, end_date, rep
                 f"Фотоотчет_{start_date.strftime('%d.%m.%Y')}-"
                 f"{end_date.strftime('%d.%m.%Y')}.pdf"
             )
+
+            send_kwargs = {}
+            if thread_id:
+                send_kwargs["message_thread_id"] = thread_id
+
             with open(pdf_path, "rb") as fh:
                 await context.bot.send_document(
                     chat_id=chat_id,
                     document=fh,
                     filename=filename,
-                    caption=f"Фотоотчёт за {start_date.strftime('%d.%m.%Y')}–{end_date.strftime('%d.%m.%Y')}",
+                    caption=(
+                        f"{title}\n"
+                        "Фотоотчёт за "
+                        f"{start_date.strftime('%d.%m.%Y')}–"
+                        f"{end_date.strftime('%d.%m.%Y')}"
+                    ),
+                    **send_kwargs,
                 )
 
             try:
@@ -314,8 +549,13 @@ async def build_and_send_report(context, chat_id: int, start_date, end_date, rep
         await status.delete()
 
     except Exception as exc:
-        logger.exception("Report generation failed: %s", exc)
-        await status.edit_text(f"Не удалось сформировать PDF: {exc}")
+        logger.exception(
+            "Report generation failed: %s",
+            exc,
+        )
+        await status.edit_text(
+            f"Не удалось сформировать PDF: {exc}"
+        )
 
 
 def main() -> None:
@@ -327,16 +567,35 @@ def main() -> None:
         .build()
     )
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("report", report_command))
-    application.add_handler(CallbackQueryHandler(report_button, pattern=r"^report:"))
     application.add_handler(
-        MessageHandler(filters.PHOTO, save_work_log)
+        CommandHandler("start", start)
+    )
+    application.add_handler(
+        CommandHandler("help", help_command)
+    )
+    application.add_handler(
+        CommandHandler("object", object_command)
+    )
+    application.add_handler(
+        CommandHandler("report", report_command)
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            report_button,
+            pattern=r"^report:",
+        )
+    )
+    application.add_handler(
+        MessageHandler(
+            filters.PHOTO,
+            save_work_log,
+        )
     )
 
     logger.info("Starting @arsphotobot")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES
+    )
 
 
 if __name__ == "__main__":
