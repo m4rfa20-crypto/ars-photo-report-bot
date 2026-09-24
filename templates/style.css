@@ -101,8 +101,8 @@ h1 {
 
 .photo-grid figure {
     margin: 0;
-    border: 1px solid #dedede;
-    background: #f4f4f4;
+    border: 1px solid #e2e2e2;
+    background: #fff;
     overflow: hidden;
     display: flex;
     align-items: center;
@@ -111,9 +111,24 @@ h1 {
 
 .photo-grid img {
     display: block;
-    width: 100%;
-    height: 190px;
+    max-width: 100%;
     object-fit: contain;
+}
+
+.photo-grid figure.photo-landscape img {
+    width: 100%;
+}
+
+.photo-grid figure.photo-portrait,
+.photo-grid figure.photo-square {
+    border: none;
+    background: #fff;
+}
+
+.photo-grid figure.photo-portrait img,
+.photo-grid figure.photo-square img {
+    width: auto;
+    border: 1px solid #e2e2e2;
 }
 
 .photo-count-1 {
@@ -125,13 +140,19 @@ h1 {
 }
 
 .photo-count-1 img {
-    height: 270px;
-    object-fit: contain;
+    height: 290px;
+}
+
+.photo-count-1 .img-portrait {
+    height: 340px;
 }
 
 .photo-count-2 img {
     height: 210px;
-    object-fit: contain;
+}
+
+.photo-count-2 .img-portrait {
+    height: 240px;
 }
 
 .photo-count-3 figure:nth-child(3) {
@@ -140,23 +161,32 @@ h1 {
 
 .photo-count-3 img {
     height: 185px;
-    object-fit: contain;
+}
+
+.photo-count-3 .img-portrait {
+    height: 205px;
 }
 
 .photo-count-3 figure:nth-child(3) img {
-    height: 190px;
-    object-fit: contain;
+    height: 195px;
 }
 
 .photo-count-4 img {
     height: 180px;
-    object-fit: contain;
+}
+
+.photo-count-4 .img-portrait {
+    height: 195px;
 }
 
 .photo-count-5 img,
 .photo-count-6 img {
     height: 135px;
-    object-fit: contain;
+}
+
+.photo-count-5 .img-portrait,
+.photo-count-6 .img-portrait {
+    height: 150px;
 }
 
 .generated {
