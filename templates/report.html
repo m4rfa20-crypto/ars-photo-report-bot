@@ -35,8 +35,12 @@
 
             <div class="photo-grid photo-count-{{ item.photos|length }}">
                 {% for photo in item.photos %}
-                <figure>
-                    <img src="data:image/jpeg;base64,{{ photo }}">
+                <figure class="photo-{{ photo.orientation }}">
+                    <img
+                        class="img-{{ photo.orientation }}"
+                        src="data:image/jpeg;base64,{{ photo.b64 }}"
+                        alt=""
+                    >
                 </figure>
                 {% endfor %}
             </div>
