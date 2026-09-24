@@ -4,7 +4,6 @@ import html
 import io
 import os
 import tempfile
-from collections import OrderedDict
 from datetime import datetime
 
 from jinja2 import Environment, FileSystemLoader
@@ -36,7 +35,6 @@ class PDFGenerator:
     @staticmethod
     def _encode_image_sync(path: str, max_width: int = 1200, quality: int = 78) -> dict:
         with Image.open(path) as source:
-            # Apply EXIF rotation before stripping metadata while re-encoding.
             img = ImageOps.exif_transpose(source)
 
             if img.mode not in ("RGB", "L"):
@@ -45,7 +43,10 @@ class PDFGenerator:
             width, height = img.size
             if width > max_width:
                 ratio = max_width / width
-                img = img.resize((max_width, int(height * ratio)), Image.Resampling.LANCZOS)
+                img = img.resize(
+                    (max_width, int(height * ratio)),
+                    Image.Resampling.LANCZOS,
+                )
                 width, height = img.size
 
             aspect_ratio = width / height if height else 1
@@ -69,14 +70,47 @@ class PDFGenerator:
         return await asyncio.to_thread(self._encode_image_sync, path)
 
     @staticmethod
-    def _chunk_photos(photos, chunk_size=6):
-        return [photos[i:i + chunk_size] for i in range(0, len(photos), chunk_size)]
+    def _slot_cost(photo: dict) -> int:
+        return 2 if photo.get("orientation") == "landscape" else 1
+
+    @classmethod
+    def _split_by_slots(cls, photos, max_slots: int = 4):
+        chunks = []
+        current = []
+        used = 0
+
+        for photo in photos:
+            cost = cls._slot_cost(photo)
+
+            if current and used + cost > max_slots:
+                chunks.append(current)
+                current = []
+                used = 0
+
+            current.append(photo)
+            used += cost
+
+            if used == max_slots:
+                chunks.append(current)
+                current = []
+                used = 0
+
+        if current:
+            chunks.append(current)
+
+        return chunks
+
+    @staticmethod
+    def _visual_rows(photos) -> int:
+        landscapes = sum(1 for p in photos if p.get("orientation") == "landscape")
+        compact = len(photos) - landscapes
+        return landscapes + ((compact + 1) // 2)
 
     async def generate_report(self, project_name, start_date, end_date, items) -> str:
         if not self.browser:
             await self.start_browser()
 
-        expanded_items = []
+        pages = []
 
         for item in items:
             encoded = []
@@ -87,30 +121,23 @@ class PDFGenerator:
             if not encoded:
                 continue
 
-            chunks = self._chunk_photos(encoded, 6)
+            chunks = self._split_by_slots(encoded, 4)
+
             for index, chunk in enumerate(chunks):
                 caption = item.get("caption", "")
                 if index > 0 and caption:
                     caption = f"{caption} — продолжение"
 
-                expanded_items.append(
+                pages.append(
                     {
                         "date": item.get("date", ""),
                         "caption": caption,
                         "username": item.get("username", ""),
                         "photos": chunk,
+                        "rows": max(1, min(2, self._visual_rows(chunk))),
                         "continued": index > 0,
                     }
                 )
-
-        grouped_days = OrderedDict()
-        for item in expanded_items:
-            grouped_days.setdefault(item["date"], []).append(item)
-
-        days = [
-            {"date": date, "items": day_items}
-            for date, day_items in grouped_days.items()
-        ]
 
         with open(os.path.join(self.template_dir, "style.css"), "r", encoding="utf-8") as fh:
             css = fh.read()
@@ -121,7 +148,7 @@ class PDFGenerator:
             start_date=start_date.strftime("%d.%m.%Y"),
             end_date=end_date.strftime("%d.%m.%Y"),
             generated_at=datetime.now().strftime("%d.%m.%Y %H:%M"),
-            days=days,
+            pages=pages,
             css=css,
         )
 
