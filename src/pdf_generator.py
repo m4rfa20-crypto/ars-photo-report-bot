@@ -1,132 +1,99 @@
 import asyncio
 import base64
 import io
-import logging
 import os
+import tempfile
 from datetime import datetime
-from jinja2 import Environment, FileSystemLoader
-from playwright.async_api import async_playwright
-from PIL import Image
 
-logger = logging.getLogger(__name__)
+from jinja2 import Environment, FileSystemLoader
+from PIL import Image
+from playwright.async_api import async_playwright
 
 
 class PDFGenerator:
     def __init__(self, template_dir="templates"):
         self.env = Environment(loader=FileSystemLoader(template_dir))
-        self.output_dir = os.path.join("data", "reports")
-        os.makedirs(self.output_dir, exist_ok=True)
-        self._logo_b64: str = ""
+        self.template_dir = template_dir
+        self.playwright = None
+        self.browser = None
 
     async def start_browser(self):
-        """Launches the browser instance and caches static assets."""
+        if self.browser:
+            return
         self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(args=['--no-sandbox'])
-
-        # Cache logo and CSS — both are static and never change between reports
-        logo_path = os.path.join("templates", "src", "logo.png")
-        self._logo_b64 = await self._encode_file(logo_path)
-
-        css_path = os.path.join("templates", "style.css")
-        self._css = await asyncio.to_thread(self._sync_read_text, css_path)
-        logger.info("Logo and CSS cached.")
-
-    @staticmethod
-    def _sync_read_text(path: str) -> str:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
+        self.browser = await self.playwright.chromium.launch(args=["--no-sandbox"])
 
     async def close_browser(self):
-        """Closes the browser instance."""
         if self.browser:
             await self.browser.close()
+            self.browser = None
         if self.playwright:
             await self.playwright.stop()
-
-    async def _encode_file(self, path: str) -> str:
-        """Encodes a file to base64 string, off the event loop."""
-        try:
-            return await asyncio.to_thread(self._sync_encode_file, path)
-        except Exception as e:
-            logger.error(f"Error encoding file {path}: {e}")
-            return ""
+            self.playwright = None
 
     @staticmethod
-    def _sync_encode_file(path: str) -> str:
-        with open(path, "rb") as f:
-            return base64.b64encode(f.read()).decode('utf-8')
-
-    async def _optimize_image(self, path, max_width=800, quality=75):
-        """Resizes and compresses an image, returning base64."""
-        try:
-            return await asyncio.to_thread(self._sync_optimize, path, max_width, quality)
-        except Exception as e:
-            logger.error(f"Error optimizing image {path}: {e}")
-            return await self._encode_file(path)
-
-    def _sync_optimize(self, path, max_width, quality):
-        """Synchronous part of image optimization."""
+    def _encode_image_sync(path: str, max_width: int = 1200, quality: int = 78) -> str:
         with Image.open(path) as img:
-            # Convert to RGB if necessary (e.g. PNG with transparency saved as JPEG)
-            if img.mode in ("RGBA", "P"):
+            if img.mode not in ("RGB", "L"):
                 img = img.convert("RGB")
-
-            # Resize maintaining aspect ratio
             width, height = img.size
             if width > max_width:
-                ratio = max_width / float(width)
-                new_size = (max_width, int(float(height) * ratio))
-                img = img.resize(new_size, Image.Resampling.LANCZOS)
+                ratio = max_width / width
+                img = img.resize((max_width, int(height * ratio)), Image.Resampling.LANCZOS)
 
             buffer = io.BytesIO()
             img.save(buffer, format="JPEG", quality=quality, optimize=True)
-            return base64.b64encode(buffer.getvalue()).decode('utf-8')
+            return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
-    async def generate_report(self, data):
-        """Generates a PDF report from data using the persistent browser."""
-        if not hasattr(self, 'browser') or not self.browser:
+    async def _encode_image(self, path: str) -> str:
+        return await asyncio.to_thread(self._encode_image_sync, path)
+
+    async def generate_report(self, project_name, start_date, end_date, items) -> str:
+        if not self.browser:
             await self.start_browser()
 
-        # Use cached logo
-        data['logo_b64'] = self._logo_b64
+        rendered_items = []
+        for item in items:
+            encoded = []
+            for path in item.get("photo_paths", []):
+                if os.path.exists(path):
+                    encoded.append(await self._encode_image(path))
+            rendered_items.append(
+                {
+                    "date": item.get("date", ""),
+                    "time": item.get("time", ""),
+                    "caption": item.get("caption", ""),
+                    "username": item.get("username", ""),
+                    "photos": encoded,
+                }
+            )
 
-        # Optimize photos and apply safety limits
-        original_photos = data.get('photos', [])
-        MAX_PHOTOS = 50
-        photos_dropped = 0
-
-        work_photos = original_photos[:MAX_PHOTOS]
-        if len(original_photos) > MAX_PHOTOS:
-            photos_dropped = len(original_photos) - MAX_PHOTOS
-
-        optimized_photos = []
-        for photo in work_photos:
-            photo_path = photo.get('file_path')
-            if photo_path and os.path.exists(photo_path):
-                photo['b64'] = await self._optimize_image(photo_path)
-                optimized_photos.append(photo)
-
-        data['photos'] = optimized_photos
-        data['photos_dropped_count'] = photos_dropped
+        with open(os.path.join(self.template_dir, "style.css"), "r", encoding="utf-8") as fh:
+            css = fh.read()
 
         template = self.env.get_template("report.html")
-        html_content = template.render(**data)
-
-        # Create output directory for today
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        daily_output_dir = os.path.join(self.output_dir, date_str)
-        os.makedirs(daily_output_dir, exist_ok=True)
+        html = template.render(
+            project_name=project_name,
+            start_date=start_date.strftime("%d.%m.%Y"),
+            end_date=end_date.strftime("%d.%m.%Y"),
+            generated_at=datetime.now().strftime("%d.%m.%Y %H:%M"),
+            items=rendered_items,
+            css=css,
+        )
 
         page = await self.browser.new_page()
         try:
-            await page.set_content(html_content, wait_until='domcontentloaded', timeout=60000)
-            await page.add_style_tag(content=self._css)
-
-            report_id = data.get('report_id', datetime.now().strftime("%Y%m%d%H%M%S"))
-            filename = f"Site_Report_{report_id}.pdf"
-            output_path = os.path.join(daily_output_dir, filename)
-
-            await page.pdf(path=output_path, format="A4", print_background=True)
-            return output_path
+            await page.set_content(html, wait_until="domcontentloaded")
+            output = os.path.join(
+                tempfile.gettempdir(),
+                f"ars_photo_report_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.pdf",
+            )
+            await page.pdf(
+                path=output,
+                format="A4",
+                print_background=True,
+                margin={"top": "12mm", "right": "12mm", "bottom": "14mm", "left": "12mm"},
+            )
+            return output
         finally:
             await page.close()
