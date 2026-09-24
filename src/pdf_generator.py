@@ -10,6 +10,10 @@ from jinja2 import Environment, FileSystemLoader
 from PIL import Image, ImageOps
 from playwright.async_api import async_playwright
 
+ARSOLIT_BLUE = "#005DAB"
+ARSOLIT_LOGO_PATH = "M 133 312 L 135 313 L 134 332 L 132 331 Z M 51 312 L 54 313 L 53 322 L 50 321 Z M 11 312 L 13 313 L 12 324 L 10 323 Z M 247 302 L 247 312 L 253 313 L 253 343 L 263 343 L 263 313 L 270 312 L 270 302 Z M 205 302 L 205 343 L 213 343 L 215 341 L 219 327 L 220 342 L 229 343 L 230 302 L 220 302 L 215 317 L 214 302 Z M 166 302 L 164 331 L 162 332 L 162 343 L 172 343 L 175 312 L 176 343 L 186 343 L 186 302 Z M 122 302 L 122 343 L 145 343 L 145 302 Z M 82 302 L 82 343 L 104 343 L 104 328 L 94 328 L 94 331 L 91 331 L 91 313 L 93 312 L 94 316 L 104 316 L 104 302 Z M 63 302 L 41 302 L 41 343 L 50 343 L 51 333 L 63 332 Z M 2 302 L 0 343 L 9 343 L 10 335 L 14 336 L 14 343 L 23 343 L 21 302 Z M 237 5 L 203 5 L 202 63 L 139 0 L 137 0 L 7 126 L 2 132 L 2 287 L 215 287 L 216 155 L 139 75 L 116 96 L 56 156 L 56 233 L 90 233 L 90 170 L 119 138 L 136 121 L 139 120 L 182 168 L 182 191 L 108 192 L 108 220 L 181 220 L 182 255 L 114 256 L 36 254 L 36 145 L 137 46 L 237 144 L 236 286 L 271 286 L 272 133 L 237 97 Z"
+ARSOLIT_ICON_PATH = "M 237 5 L 203 5 L 202 63 L 139 0 L 137 0 L 7 126 L 2 132 L 2 279 L 215 279 L 216 155 L 139 75 L 116 96 L 56 156 L 56 233 L 90 233 L 90 170 L 119 138 L 136 121 L 139 120 L 182 168 L 182 191 L 108 192 L 108 220 L 181 220 L 182 255 L 114 256 L 36 254 L 36 145 L 137 46 L 237 144 L 236 279 L 271 279 L 272 133 L 237 97 Z"
+
 
 class PDFGenerator:
     def __init__(self, template_dir="templates"):
@@ -150,6 +154,9 @@ class PDFGenerator:
             generated_at=datetime.now().strftime("%d.%m.%Y %H:%M"),
             pages=pages,
             css=css,
+            brand_blue=ARSOLIT_BLUE,
+            arsolit_logo_path=ARSOLIT_LOGO_PATH,
+            arsolit_icon_path=ARSOLIT_ICON_PATH,
         )
 
         period = f"{start_date.strftime('%d.%m.%Y')} — {end_date.strftime('%d.%m.%Y')}"
@@ -167,7 +174,12 @@ class PDFGenerator:
             justify-content:space-between;
             align-items:center;
         ">
-            <span>{safe_project}</span>
+            <span style="display:flex;align-items:center;gap:5px;">
+                <svg width="12" height="14" viewBox="0 0 273 280" aria-hidden="true">
+                    <path d="{ARSOLIT_ICON_PATH}" fill="{ARSOLIT_BLUE}"></path>
+                </svg>
+                <span>Арсолит · {safe_project}</span>
+            </span>
             <span>{safe_period}</span>
             <span>Стр. <span class="pageNumber"></span> из <span class="totalPages"></span></span>
         </div>
