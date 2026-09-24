@@ -21,7 +21,7 @@
     <section class="day-section">
         <h2 class="day-title">{{ day.date }}</h2>
 
-        {% for item in day.items %}
+        {% for item in day["items"] %}
         <article class="entry">
             <div class="entry-head">
                 {% if item.caption %}
