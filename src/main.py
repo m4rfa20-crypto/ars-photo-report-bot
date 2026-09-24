@@ -1,598 +1,342 @@
+import asyncio
 import logging
 import os
-import time
-import asyncio
-from datetime import datetime, time as dt_time, timedelta, timezone
+import tempfile
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+
+from sqlalchemy import select
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from src.config import Config
-from src.ai_engine import AIEngine
-from src.weather import WeatherClient
-from src.openproject import OpenProjectClient
+from src.database import AsyncSessionLocal, init_db
+from src.models import WorkLog
 from src.pdf_generator import PDFGenerator
-from src.database import init_db, AsyncSessionLocal
-from src.models import ChatLog, PhotoMetadata, ReportCounter, Report, BotSettings
-from sqlalchemy import select
 
 
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# Initialize modules
-ai_engine = AIEngine()
-weather_client = WeatherClient()
-openproject_client = OpenProjectClient()
+LOCAL_TZ = ZoneInfo(Config.TIMEZONE)
 pdf_generator = PDFGenerator()
 
-BAGHDAD_TZ = ZoneInfo("Asia/Baghdad")
 
-
-def _utcnow() -> datetime:
-    """Returns current time as timezone-naive UTC (SQLite compatible)."""
+def utcnow_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def _baghdad_date_str() -> str:
-    """Returns today's date string in Baghdad local time (the site's work day)."""
-    return datetime.now(BAGHDAD_TZ).strftime("%Y-%m-%d")
+def local_date_from_utc(value: datetime):
+    return value.replace(tzinfo=timezone.utc).astimezone(LOCAL_TZ).date()
 
 
-def _today_start_utc() -> datetime:
-    """Returns Baghdad midnight as a naive UTC datetime for DB range queries."""
-    now_baghdad = datetime.now(BAGHDAD_TZ)
-    midnight_baghdad = datetime.combine(now_baghdad.date(), dt_time.min, tzinfo=BAGHDAD_TZ)
-    return midnight_baghdad.astimezone(timezone.utc).replace(tzinfo=None)
+def parse_date(value: str):
+    for fmt in ("%d.%m.%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            pass
+    raise ValueError("Неверный формат даты")
+
+
+def date_bounds_utc(start_date, end_date):
+    start_local = datetime.combine(start_date, datetime.min.time(), tzinfo=LOCAL_TZ)
+    end_local = datetime.combine(end_date + timedelta(days=1), datetime.min.time(), tzinfo=LOCAL_TZ)
+    return (
+        start_local.astimezone(timezone.utc).replace(tzinfo=None),
+        end_local.astimezone(timezone.utc).replace(tzinfo=None),
+    )
+
+
+def report_allowed(user_id: int) -> bool:
+    return not Config.admin_ids or user_id in Config.admin_ids
 
 
 async def post_init(application: Application) -> None:
-    """Initialize the database and browser on startup."""
-    try:
-        await init_db()
-        logger.info("Database initialized.")
-        await pdf_generator.start_browser()
-        logger.info("PDF Browser initialized.")
-    except Exception as e:
-        logger.critical(f"Failed to initialize application: {e}")
-        logger.error("Continuing startup despite initialization failure (Partial Mode).")
+    await init_db()
+    await pdf_generator.start_browser()
+    logger.info("ARS Photo Report Bot initialized")
+
+
+async def post_shutdown(application: Application) -> None:
+    await pdf_generator.close_browser()
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a welcome message when the command /start is issued."""
-    user = update.effective_user
-    await update.message.reply_html(
-        f"Ahlan {user.mention_html()}! I am the Burj Nawas AI Site Coordinator.",
+    await update.message.reply_text(
+        "Бот фотоотчётов готов.\n\n"
+        "Просто отправляйте в эту группу фотографии с подписями и текстовые сообщения. "
+        "Для формирования отчёта используйте /report."
     )
 
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a message when the command /help is issued."""
-    await update.message.reply_text("Send me site photos or text updates. I can also generate reports.")
+    await update.message.reply_text(
+        "/report — выбрать период отчёта\n"
+        "/report 01.09.2026 07.09.2026 — отчёт за произвольный период\n\n"
+        "Фотографии и подписи сохраняются автоматически. Сам бот в рабочем чате не спамит."
+    )
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Saves the user message to the log DB."""
-    await save_log(update)
-    # AI analysis is deferred to report generation time, not per-message.
-    # await update.message.reply_text("✅") # Optional acknowledgement
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle photo uploads."""
-    try:
-        photo_file = await update.message.photo[-1].get_file()
+async def save_work_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message:
+        return
 
-        # Save photo to disk — use Baghdad local date as the work-day identifier
-        date_str = _baghdad_date_str()
-        log_dir = os.path.join(Config.LOGS_DIR, date_str, "photos")
-        os.makedirs(log_dir, exist_ok=True)
+    user = update.effective_user
+    text = message.caption if message.photo else message.text
+    photo_file_id = None
+    photo_unique_id = None
 
-        file_path = os.path.join(log_dir, f"{photo_file.file_unique_id}.jpg")
-        await photo_file.download_to_drive(file_path)
-        logger.info(f"Photo saved to {file_path}")
+    if message.photo:
+        photo = message.photo[-1]
+        photo_file_id = photo.file_id
+        photo_unique_id = photo.file_unique_id
 
-        caption = update.message.caption
-
-        # Save caption log + photo metadata in a single DB session
-        try:
-            async with AsyncSessionLocal() as session:
-                if caption:
-                    username = update.message.from_user.username or update.message.from_user.id
-                    log_entry = ChatLog(
-                        user_id=str(update.message.from_user.id),
-                        username=str(username),
-                        message=f"[PHOTO CAPTION]: {caption}",
-                        timestamp=_utcnow()
-                    )
-                    session.add(log_entry)
-
-                photo_entry = PhotoMetadata(
-                    file_unique_id=photo_file.file_unique_id,
-                    file_path=file_path,
-                    analysis="",
-                    caption=caption or "",
-                    timestamp=_utcnow(),
-                    date_str=date_str
-                )
-                session.add(photo_entry)
-                await session.commit()
-        except Exception as e:
-            logger.error(f"Error saving photo to DB: {e}")
-
-        await update.message.reply_text("تم حفظ الصورة  📸")
-
-    except Exception as e:
-        logger.error(f"Error in handle_photo: {e}")
-        await update.message.reply_text("Failed to process photo.")
-
-async def generate_report_id():
-    """Generates a unique report ID in format BN-MMM-YY-NNN using DB."""
-    # Use Baghdad local time so the report ID matches the site's work day
-    now = datetime.now(BAGHDAD_TZ)
-    month_str = now.strftime("%b").upper()
-    year_str = now.strftime("%y")
-    month_key = now.strftime("%Y-%m")
+    entry = WorkLog(
+        chat_id=str(update.effective_chat.id),
+        message_id=message.message_id,
+        media_group_id=message.media_group_id,
+        user_id=str(user.id) if user else None,
+        username=(user.username or user.full_name) if user else None,
+        text=text or "",
+        photo_file_id=photo_file_id,
+        photo_unique_id=photo_unique_id,
+        timestamp=utcnow_naive(),
+    )
 
     try:
-        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
         async with AsyncSessionLocal() as session:
-            # Atomic upsert — safe against simultaneous /report triggers
-            stmt = sqlite_insert(ReportCounter).values(month_key=month_key, count=1)
-            stmt = stmt.on_conflict_do_update(
-                index_elements=["month_key"],
-                set_={"count": ReportCounter.count + 1}
-            )
-            await session.execute(stmt)
+            session.add(entry)
             await session.commit()
+    except Exception as exc:
+        logger.exception("Could not save message: %s", exc)
 
-            result = await session.execute(select(ReportCounter).where(ReportCounter.month_key == month_key))
-            counter = result.scalar_one()
-            return f"BN-{month_str}-{year_str}-{counter.count:03d}"
-    except Exception as e:
-        logger.error(f"Error generating report ID: {e}")
-        return f"BN-ERR-{int(_utcnow().timestamp())}"
 
-async def check_weather_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Checks for severe weather and sends alerts to admin/group."""
+def period_keyboard():
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Сегодня", callback_data="report:today"),
+                InlineKeyboardButton("Последние 7 дней", callback_data="report:7"),
+            ],
+            [
+                InlineKeyboardButton("Последние 30 дней", callback_data="report:30"),
+                InlineKeyboardButton("Другой период", callback_data="report:custom"),
+            ],
+        ]
+    )
+
+
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not report_allowed(update.effective_user.id):
+        await update.message.reply_text("Формирование отчётов доступно только администратору.")
+        return
+
+    if len(context.args) == 2:
+        try:
+            start_date = parse_date(context.args[0])
+            end_date = parse_date(context.args[1])
+            if start_date > end_date:
+                start_date, end_date = end_date, start_date
+        except ValueError:
+            await update.message.reply_text(
+                "Не понял даты. Используйте, например:\n/report 01.09.2026 07.09.2026"
+            )
+            return
+
+        await build_and_send_report(
+            context=context,
+            chat_id=update.effective_chat.id,
+            start_date=start_date,
+            end_date=end_date,
+            reply_target=update.message,
+        )
+        return
+
+    await update.message.reply_text("За какой период сформировать отчёт?", reply_markup=period_keyboard())
+
+
+async def report_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    if not report_allowed(update.effective_user.id):
+        await query.edit_message_text("Формирование отчётов доступно только администратору.")
+        return
+
+    action = query.data.split(":", 1)[1]
+    today = datetime.now(LOCAL_TZ).date()
+
+    if action == "custom":
+        await query.edit_message_text(
+            "Для произвольного периода отправьте команду в формате:\n"
+            "/report 01.09.2026 07.09.2026"
+        )
+        return
+
+    if action == "today":
+        start_date = end_date = today
+    else:
+        days = int(action)
+        end_date = today
+        start_date = today - timedelta(days=days - 1)
+
+    await query.edit_message_text(
+        f"Формирую отчёт за {start_date.strftime('%d.%m.%Y')}–{end_date.strftime('%d.%m.%Y')}…"
+    )
+    await build_and_send_report(
+        context=context,
+        chat_id=update.effective_chat.id,
+        start_date=start_date,
+        end_date=end_date,
+        reply_target=query.message,
+    )
+
+
+async def load_rows(chat_id: int, start_date, end_date):
+    start_utc, end_utc = date_bounds_utc(start_date, end_date)
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(WorkLog)
+            .where(
+                WorkLog.chat_id == str(chat_id),
+                WorkLog.timestamp >= start_utc,
+                WorkLog.timestamp < end_utc,
+            )
+            .order_by(WorkLog.timestamp, WorkLog.message_id)
+        )
+        return list(result.scalars().all())
+
+
+def group_rows(rows):
+    grouped = defaultdict(list)
+    for row in rows:
+        date_key = local_date_from_utc(row.timestamp).isoformat()
+        if row.media_group_id:
+            item_key = f"album:{row.media_group_id}"
+        else:
+            item_key = f"message:{row.message_id}"
+        grouped[(date_key, item_key)].append(row)
+
+    result = []
+    for (date_key, _), items in grouped.items():
+        first = items[0]
+        caption = next((item.text for item in items if item.text), "")
+        result.append(
+            {
+                "date": date_key,
+                "timestamp": first.timestamp,
+                "caption": caption,
+                "username": first.username or "",
+                "photos": [item for item in items if item.photo_file_id],
+            }
+        )
+
+    result.sort(key=lambda x: x["timestamp"])
+    return result
+
+
+async def download_photo(bot, file_id: str, destination: str):
+    file = await bot.get_file(file_id)
+    await file.download_to_drive(destination)
+
+
+async def build_and_send_report(context, chat_id: int, start_date, end_date, reply_target) -> None:
+    rows = await load_rows(chat_id, start_date, end_date)
+    if not rows:
+        await reply_target.reply_text("За выбранный период записей не найдено.")
+        return
+
+    groups = group_rows(rows)
+    photo_count = sum(len(group["photos"]) for group in groups)
+
+    status = await reply_target.reply_text(
+        f"Найдено записей: {len(groups)}\nФотографий: {photo_count}\nГотовлю PDF…"
+    )
+
     try:
-        alert_msg = await weather_client.check_severe_conditions()
-        if alert_msg:
-            chat_id = None
-            async with AsyncSessionLocal() as session:
-                result = await session.execute(select(BotSettings).where(BotSettings.key == "safety_channel"))
-                setting = result.scalar_one_or_none()
-                if setting:
-                    chat_id = int(setting.value)
+        with tempfile.TemporaryDirectory(prefix="ars_report_") as temp_dir:
+            report_items = []
 
-            if chat_id:
-                try:
-                    await context.bot.send_message(chat_id=chat_id, text=alert_msg)
-                except Exception as e:
-                    logger.error(f"Failed to send alert to group {chat_id}: {e}")
-            else:
-                logger.warning("No safety channel configured for weather alerts. Falling back to admin IDs.")
-                for user_id in Config.ADMIN_IDS:
+            for group_index, group in enumerate(groups, start=1):
+                local_paths = []
+                for photo_index, photo in enumerate(group["photos"], start=1):
+                    path = os.path.join(temp_dir, f"{group_index}_{photo_index}.jpg")
                     try:
-                        await context.bot.send_message(chat_id=user_id, text=alert_msg)
-                    except Exception as e:
-                        logger.error(f"Failed to send alert to {user_id}: {e}")
-    except Exception as e:
-        logger.error(f"Error checking weather alerts: {e}")
+                        await download_photo(context.bot, photo.photo_file_id, path)
+                        local_paths.append(path)
+                    except Exception as exc:
+                        logger.warning("Failed to download photo %s: %s", photo.id, exc)
 
-async def generate_daily_report(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Scheduled task to generate daily report."""
-    job = context.job
-    chat_id = job.chat_id
-
-    logger.info("Generating daily report...")
-    start_time = time.time()
-
-    try:
-        # Generate Unique ID
-        report_id = await generate_report_id()
-        logger.debug(f"Report ID generated in {time.time() - start_time:.2f}s")
-
-        # Read Logs from DB
-        step_start = time.time()
-        date_str = _baghdad_date_str()  # Baghdad work-day date for photo/report filtering
-        chat_content = ""
-
-        async with AsyncSessionLocal() as session:
-            # Timestamps are stored as naive UTC; convert Baghdad midnight to UTC for query
-            today_start_utc = _today_start_utc()
-
-            result = await session.execute(
-                select(ChatLog)
-                .where(ChatLog.timestamp >= today_start_utc)
-                .order_by(ChatLog.timestamp)
-            )
-            logs = result.scalars().all()
-
-            if logs:
-                chat_content = "\n".join([f"{log.timestamp}: {log.username}: {log.message}" for log in logs])
-            else:
-                logger.info("No logs found for today.")
-                chat_content = "No logs recorded today."
-        logger.debug(f"Logs fetched in {time.time() - step_start:.2f}s")
-
-        # Fetch weather and OpenProject data concurrently
-        step_start = time.time()
-        weather_current, projects_summary = await asyncio.gather(
-            weather_client.get_current_weather(),
-            openproject_client.get_summary()
-        )
-        logger.debug(f"Weather + OpenProject fetched in {time.time() - step_start:.2f}s")
-
-        # Get Photo metadata from DB
-        step_start = time.time()
-        photos_data = []
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(select(PhotoMetadata).where(PhotoMetadata.date_str == date_str))
-            photos_db = result.scalars().all()
-
-            for p in photos_db:
-                # p.timestamp is naive UTC — convert to Baghdad for display
-                ts_baghdad = p.timestamp.replace(tzinfo=timezone.utc).astimezone(BAGHDAD_TZ)
-                photos_data.append({
-                    "file_path": p.file_path,
-                    "abs_path": os.path.abspath(p.file_path),
-                    "timestamp": ts_baghdad.strftime("%H:%M"),
-                    "caption": p.caption
-                })
-        logger.debug(f"Photos processed in {time.time() - step_start:.2f}s")
-
-        # AI Analysis & Summary (Parallelized)
-        step_start = time.time()
-        context_text = f"Daily Summary based on logs: {chat_content}"
-
-        site_summary_data, analysis_overall = await asyncio.gather(
-            ai_engine.summarize_logs(chat_content),
-            ai_engine.analyze_site_data(
-                text_input=context_text,
-                weather_data=weather_current,
-                project_data=projects_summary
-            )
-        )
-        logger.debug(f"AI Tasks completed in {time.time() - step_start:.2f}s")
-
-        data = {
-            "date": date_str,
-            "report_id": report_id,
-            "weather": {
-                "current": weather_current,
-                "forecast": []
-            },
-            "projects": projects_summary,
-            "site_manpower_machinery": site_summary_data.get('site_manpower_machinery', ''),
-            "site_activities": site_summary_data.get('site_activities', ''),
-            "analysis": analysis_overall,
-            "photos": photos_data
-        }
-
-        step_start = time.time()
-        pdf_path = await pdf_generator.generate_report(data)
-        logger.debug(f"PDF generated in {time.time() - step_start:.2f}s")
-
-        step_start = time.time()
-        with open(pdf_path, 'rb') as pdf_file:
-            await context.bot.send_document(chat_id=chat_id, document=pdf_file, filename=f"Site_Report_{date_str}_{report_id}.pdf")
-        logger.debug(f"Report sent to chat in {time.time() - step_start:.2f}s")
-
-        # Save report tracking to DB
-        try:
-            async with AsyncSessionLocal() as session:
-                new_report = Report(
-                    report_id_str=report_id,
-                    date=date_str,
-                    file_path=pdf_path
+                local_dt = group["timestamp"].replace(tzinfo=timezone.utc).astimezone(LOCAL_TZ)
+                report_items.append(
+                    {
+                        "date": local_dt.strftime("%d.%m.%Y"),
+                        "time": local_dt.strftime("%H:%M"),
+                        "caption": group["caption"],
+                        "username": group["username"],
+                        "photo_paths": local_paths,
+                    }
                 )
-                session.add(new_report)
-                await session.commit()
-                logger.info("Report record saved to DB.")
-        except Exception as e:
-            logger.error(f"Error saving report to DB: {e}")
 
-        logger.info(f"Total report generation time: {time.time() - start_time:.2f}s")
+            title = Config.PROJECT_NAME.strip() or getattr(reply_target.chat, "title", None) or "Строительный объект"
 
-    except Exception as e:
-        logger.error(f"Error generating daily report: {e}")
-        # Notify the channel so the failure is not silent
-        try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"❌ فشل إنشاء التقرير اليومي. يرجى المحاولة مرة أخرى بالأمر /report\nالخطأ: {e}"
+            pdf_path = await pdf_generator.generate_report(
+                project_name=title,
+                start_date=start_date,
+                end_date=end_date,
+                items=report_items,
             )
-        except Exception:
-            pass  # Don't let notification failure mask the original error log
 
-async def save_log(update: Update):
-    """Saves message to DB."""
-    try:
-        user = update.message.from_user
-        username = user.username or str(user.id)
-        message = update.message.text
-
-        async with AsyncSessionLocal() as session:
-            log_entry = ChatLog(
-                user_id=str(user.id),
-                username=username,
-                message=message,
-                timestamp=_utcnow()
+            filename = (
+                f"Фотоотчет_{start_date.strftime('%d.%m.%Y')}-"
+                f"{end_date.strftime('%d.%m.%Y')}.pdf"
             )
-            session.add(log_entry)
-            await session.commit()
+            with open(pdf_path, "rb") as fh:
+                await context.bot.send_document(
+                    chat_id=chat_id,
+                    document=fh,
+                    filename=filename,
+                    caption=f"Фотоотчёт за {start_date.strftime('%d.%m.%Y')}–{end_date.strftime('%d.%m.%Y')}",
+                )
 
-    except Exception as e:
-        logger.error(f"Error saving log: {e}")
+            try:
+                os.remove(pdf_path)
+            except OSError:
+                pass
+
+        await status.delete()
+
+    except Exception as exc:
+        logger.exception("Report generation failed: %s", exc)
+        await status.edit_text(f"Не удалось сформировать PDF: {exc}")
+
 
 def main() -> None:
-    """Start the bot."""
-    try:
-        Config.validate()
+    application = (
+        Application.builder()
+        .token(Config.TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
 
-        application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("report", report_command))
+    application.add_handler(CallbackQueryHandler(report_button, pattern=r"^report:"))
+    application.add_handler(
+        MessageHandler((filters.PHOTO | filters.TEXT) & ~filters.COMMAND, save_work_log)
+    )
 
-        # Commands
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(CommandHandler("report", manual_report))
-        application.add_handler(CommandHandler("set_safety_channel", set_safety_channel))
-        application.add_handler(CommandHandler("test_wp_alert", test_wp_alert))
+    logger.info("Starting @arsphotobot")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-        # Messages
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-
-        # Schedule jobs
-        if application.job_queue:
-            # Severe Weather Alerts (every 1 hour)
-            application.job_queue.run_repeating(check_weather_alerts, interval=3600, first=10)
-
-            # Daily Safety Advice at 8:00 AM Iraq Time
-            application.job_queue.run_daily(send_daily_safety_tip, time=dt_time(8, 0, tzinfo=BAGHDAD_TZ))
-
-            # Activity Reminder at 10:00 AM Iraq Time
-            application.job_queue.run_daily(check_activity_and_remind, time=dt_time(10, 0, tzinfo=BAGHDAD_TZ))
-
-            # Due Workpackages Notification at 9:00 AM Iraq Time
-            application.job_queue.run_daily(check_due_workpackages, time=dt_time(9, 0, tzinfo=BAGHDAD_TZ))
-
-            # Weather Report at 10:00 AM and 6:00 PM Iraq Time
-            application.job_queue.run_daily(send_weather_report, time=dt_time(10, 0, tzinfo=BAGHDAD_TZ))
-            application.job_queue.run_daily(send_weather_report, time=dt_time(18, 0, tzinfo=BAGHDAD_TZ))
-
-            # Night Shift Reminder at 8:00 PM Iraq Time
-            application.job_queue.run_daily(send_night_shift_reminder, time=dt_time(20, 0, tzinfo=BAGHDAD_TZ))
-
-            # Auto-Generate Daily Report at 9:00 PM Iraq Time
-            application.job_queue.run_daily(check_and_auto_generate_report, time=dt_time(21, 0, tzinfo=BAGHDAD_TZ))
-
-        logger.info("Starting bot...")
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
-    except Exception as e:
-        logger.critical(f"Fatal error starting bot: {e}")
-
-async def manual_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Manually trigger report generation."""
-    user_id = update.effective_user.id
-    if user_id not in Config.ADMIN_IDS:
-        await update.message.reply_text("عذراً، هذا الأمر متاح للمشرفين فقط. ⛔")
-        return
-
-    await update.message.reply_text("جاري تحليل بيانات الموقع وإعداد التقرير... 🤖🧠")
-    context.job_queue.run_once(generate_daily_report, 1, chat_id=update.effective_chat.id)
-
-async def set_safety_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sets the current channel as the broadcast channel for safety advice."""
-    user_id = update.effective_user.id
-    if user_id not in Config.ADMIN_IDS:
-        logger.warning(f"Access denied. User {user_id} not in admin list.")
-        await update.message.reply_text("عذراً، هذا الأمر متاح للمشرفين فقط. ⛔")
-        return
-
-    chat_id = update.effective_chat.id
-    try:
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(select(BotSettings).where(BotSettings.key == "safety_channel"))
-            setting = result.scalar_one_or_none()
-
-            if setting:
-                setting.value = str(chat_id)
-            else:
-                setting = BotSettings(key="safety_channel", value=str(chat_id))
-                session.add(setting)
-            await session.commit()
-        await update.message.reply_text("✅ تم تعيين هذه المجموعة لاستلام نصائح السلامة اليومية.")
-    except Exception as e:
-        logger.error(f"Error setting safety channel: {e}")
-        await update.message.reply_text("حدث خطأ أثناء حفظ الإعدادات.")
-
-async def send_daily_safety_tip(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends AI-generated safety advice to the configured channel."""
-    try:
-        chat_id = None
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(select(BotSettings).where(BotSettings.key == "safety_channel"))
-            setting = result.scalar_one_or_none()
-            if setting:
-                chat_id = int(setting.value)
-
-        if chat_id:
-            tip = await ai_engine.get_safety_advice()
-            await context.bot.send_message(chat_id=chat_id, text=tip)
-        else:
-            logger.warning("No safety channel configured. Run /set_safety_channel first.")
-
-    except Exception as e:
-        logger.error(f"Error sending safety advice: {e}")
-
-async def send_weather_report(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends the 3-day weather forecast report."""
-    try:
-        chat_id = None
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(select(BotSettings).where(BotSettings.key == "safety_channel"))
-            setting = result.scalar_one_or_none()
-            if setting:
-                chat_id = int(setting.value)
-
-        if chat_id:
-            report_msg = await weather_client.get_three_day_forecast_report()
-            if report_msg:
-                await context.bot.send_message(chat_id=chat_id, text=report_msg)
-        else:
-            logger.warning("No safety channel configured for weather reports.")
-    except Exception as e:
-        logger.error(f"Error sending weather report: {e}")
-
-async def check_activity_and_remind(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Checks if there has been any activity today. If not, sends a reminder."""
-    try:
-        date_str = _baghdad_date_str()
-        has_activity = False
-
-        async with AsyncSessionLocal() as session:
-            today_start_utc = _today_start_utc()
-
-            result_logs = await session.execute(select(ChatLog).where(ChatLog.timestamp >= today_start_utc))
-            logs = result_logs.scalars().all()
-            for log in logs:
-                if len(log.message.strip()) > 15 or "[PHOTO CAPTION]" in log.message:
-                    has_activity = True
-                    break
-
-            if not has_activity:
-                result_photos = await session.execute(select(PhotoMetadata).where(PhotoMetadata.date_str == date_str).limit(1))
-                if result_photos.scalar_one_or_none():
-                    has_activity = True
-
-        if not has_activity:
-            chat_id = None
-            async with AsyncSessionLocal() as session:
-                result = await session.execute(select(BotSettings).where(BotSettings.key == "safety_channel"))
-                setting = result.scalar_one_or_none()
-                if setting:
-                    chat_id = int(setting.value)
-
-            if chat_id:
-                msg = "صباح الخير، معكم المهندس الذكي للموقع. 👷‍♂️🤖\nيرجى البدء بإرسال تفاصيل العمل والأنشطة والصور ليتسنى لي إعداد التقرير اليومي للموقع. 📝📸"
-                await context.bot.send_message(chat_id=chat_id, text=msg)
-            else:
-                logger.warning("No channel configured for reminder.")
-
-    except Exception as e:
-        logger.error(f"Error sending activity reminder: {e}")
-
-async def send_night_shift_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends a reminder for night shift updates."""
-    try:
-        chat_id = None
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(select(BotSettings).where(BotSettings.key == "safety_channel"))
-            setting = result.scalar_one_or_none()
-            if setting:
-                chat_id = int(setting.value)
-
-        if chat_id:
-            msg = "مساء الخير يا أبطال 🌙\nيرجى تزويدي بتفاصيل وصور أعمال الشفت الليلي لإضافتها للتقرير اليومي. 📸📝"
-            await context.bot.send_message(chat_id=chat_id, text=msg)
-        else:
-            logger.warning("No channel configured for night shift reminder.")
-
-    except Exception as e:
-        logger.error(f"Error sending night shift reminder: {e}")
-
-async def check_and_auto_generate_report(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Checks if a report was generated today. If not, auto-generates it."""
-    try:
-        date_str = _baghdad_date_str()
-
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(select(Report).where(Report.date == date_str))
-            report = result.scalar_one_or_none()
-
-            if report:
-                logger.info(f"Report already generated for {date_str}. Skipping auto-generation.")
-                return
-
-            result_setting = await session.execute(select(BotSettings).where(BotSettings.key == "safety_channel"))
-            setting = result_setting.scalar_one_or_none()
-
-            if setting:
-                chat_id = int(setting.value)
-                msg = "لم يتم إنشاء التقرير اليومي حتى الآن. جاري الإعداد التلقائي للتقرير... 🤖📝"
-                await context.bot.send_message(chat_id=chat_id, text=msg)
-                context.job_queue.run_once(generate_daily_report, 1, chat_id=chat_id)
-            else:
-                logger.warning("No safety channel configured for auto report generation.")
-    except Exception as e:
-        logger.error(f"Error checking/auto-generating report: {e}")
-
-async def check_due_workpackages(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Checks for active workpackages that are due soon and notifies the group."""
-    try:
-        summary = await openproject_client.get_summary()
-        active_packages = summary.get("active", [])
-
-        if not active_packages:
-            return
-
-        now_baghdad = datetime.now(BAGHDAD_TZ)
-        today = now_baghdad.date()
-        tomorrow = today + timedelta(days=1)
-
-        due_packages = []
-
-        for pkg in active_packages:
-            due_date_str = pkg.get("dueDate")
-            if not due_date_str:
-                continue
-            
-            try:
-                due_date = datetime.strptime(due_date_str, "%Y-%m-%d").date()
-                if due_date <= tomorrow:
-                    due_packages.append(pkg)
-            except ValueError:
-                logger.warning(f"Could not parse due date: {due_date_str} for project ID {pkg.get('id')}")
-                continue
-
-        if not due_packages:
-            logger.info("No workpackages due soon.")
-            return
-
-        alert_lines = ["⚠️ *تنبيه: المهام التالية اقترب موعد تسليمها أو تأخرت:*"]
-        for pkg in due_packages:
-            alert_lines.append(f"🔸 {pkg.get('subject')} (تاريخ الانتهاء: {pkg.get('dueDate')})")
-
-        alert_msg = "\n".join(alert_lines)
-
-        chat_id = None
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(select(BotSettings).where(BotSettings.key == "safety_channel"))
-            setting = result.scalar_one_or_none()
-            if setting:
-                chat_id = int(setting.value)
-
-        if chat_id:
-            await context.bot.send_message(chat_id=chat_id, text=alert_msg, parse_mode='Markdown')
-        else:
-            logger.warning("No safety channel configured for workpackage alerts. Falling back to admin IDs.")
-            for user_id in Config.ADMIN_IDS:
-                try:
-                    await context.bot.send_message(chat_id=user_id, text=alert_msg, parse_mode='Markdown')
-                except Exception as e:
-                    logger.error(f"Failed to send alert to {user_id}: {e}")
-    except Exception as e:
-        logger.error(f"Error checking due workpackages: {e}")
-
-async def test_wp_alert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Manually trigger workpackage alert generation."""
-    user_id = update.effective_user.id
-    if user_id not in Config.ADMIN_IDS:
-        await update.message.reply_text("عذراً، هذا الأمر متاح للمشرفين فقط. ⛔")
-        return
-
-    await update.message.reply_text("جاري التحقق من المهام المقتربة... ⏳")
-    context.job_queue.run_once(check_due_workpackages, 1)
 
 if __name__ == "__main__":
     main()
