@@ -19,6 +19,12 @@ AsyncSessionLocal = sessionmaker(
 
 
 async def init_db() -> None:
+    # Avoid silently replacing the previous Railway history on the Render worker.
+    if os.environ.get("REQUIRE_EXISTING_DB", "").strip().lower() in {"1", "true", "yes", "on"}:
+        db_path = os.path.join(Config.DATA_DIR, "ars_photo_report.db")
+        if not os.path.isfile(db_path) or os.path.getsize(db_path) == 0:
+            raise RuntimeError("Existing Railway SQLite database is required before startup")
+
     async with engine.begin() as conn:
         # Create new tables on fresh installs and any newly introduced tables.
         await conn.run_sync(Base.metadata.create_all)
