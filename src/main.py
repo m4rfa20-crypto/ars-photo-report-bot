@@ -26,6 +26,7 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)  # Telegram API URLs contain the bot token.
 logger = logging.getLogger(__name__)
 
 LOCAL_TZ = ZoneInfo(Config.TIMEZONE)
