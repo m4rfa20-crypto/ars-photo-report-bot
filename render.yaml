@@ -10,6 +10,7 @@ services:
     branch: main
     autoDeployTrigger: off
     dockerfilePath: ./Dockerfile
+    dockerCommand: python -m src.migration_bootstrap
     disk:
       name: ars-photo-report-data
       mountPath: /app/data
