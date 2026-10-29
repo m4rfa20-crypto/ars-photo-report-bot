@@ -1,0 +1,25 @@
+# Render Blueprint for the Telegram long-polling photo-report bot.
+# This is a background worker (no HTTP port), not a web service.
+# A persistent disk and the EXISTING Railway SQLite database are required.
+services:
+  - type: worker
+    name: ars-photo-report-bot
+    runtime: docker
+    plan: 0.5c-512mb
+    region: frankfurt
+    branch: main
+    autoDeployTrigger: off
+    dockerfilePath: ./Dockerfile
+    disk:
+      name: ars-photo-report-data
+      mountPath: /app/data
+      sizeGB: 1
+    envVars:
+      - key: DATA_DIR
+        value: /app/data
+      - key: TIMEZONE
+        value: Europe/Moscow
+      - key: REQUIRE_EXISTING_DB
+        value: "true"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
